@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.4
+ * Version:     2.2.5
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -76,10 +76,13 @@
  *   - Paste your Mailgun API key and sending domain (US region only).
  *   - Set the default From name/email (must be on a domain verified in Mailgun).
  *   - Paste your Mailgun HTTP webhook signing key.
- *   - Define WPEL_TWILIO_ACCOUNT_SID / WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN /
- *     WPEL_TWILIO_FROM_NUMBER in wp-config.php (no Settings field for these —
- *     see notify_twilio() in includes/class-wpel-monitor.php), then list the
- *     phone number(s) that should receive SMS alerts on the Settings page.
+ *   - Set the Twilio Account SID / SID / Auth Token / From number on the
+ *     Settings page's Twilio / SMS tab, or define WPEL_TWILIO_ACCOUNT_SID /
+ *     WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN / WPEL_TWILIO_FROM_NUMBER in
+ *     wp-config.php to share one Twilio account across sites (Settings
+ *     overrides the constant per-field — see get_twilio_credentials() in
+ *     includes/class-wpel-monitor.php), then list the phone number(s) that
+ *     should receive SMS alerts on that same tab.
  *   - Set the alert email recipient.
  *   - In the Mailgun dashboard, add a webhook pointing at:
  *       https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
@@ -100,7 +103,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.4' );
+define( 'WPEL_VERSION', '2.2.5' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

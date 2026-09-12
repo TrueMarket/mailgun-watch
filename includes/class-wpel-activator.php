@@ -88,8 +88,12 @@ class WPEL_Activator {
 			// Logging + alerting.
 			'alert_email'      => get_option( 'admin_email' ),
 			'slack_webhook'    => '', // saved but currently unused -- Slack alerting is disabled and hidden
-			// Twilio Account SID / API key / auth token / from number are wp-config.php
-			// constants only (see notify_twilio() in class-wpel-monitor.php).
+			// Twilio credentials: Settings overrides the matching wp-config.php
+			// constant when set (see get_twilio_credentials() in class-wpel-monitor.php).
+			'twilio_account_sid' => '',
+			'twilio_sid'         => '',
+			'twilio_auth_token'  => '',
+			'twilio_from_number' => '',
 			'twilio_to_numbers' => '',
 			'signing_key'      => '',
 			'store_body'       => 0,

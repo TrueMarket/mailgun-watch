@@ -524,29 +524,58 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
+	 * Resolves the four Twilio credentials, letting a Settings-page value
+	 * (Twilio / SMS tab) override the matching wp-config.php constant when
+	 * set, same precedence as the Mailgun signing key above. Leaving Settings
+	 * blank keeps working via the constants alone, so an account-wide
+	 * wp-config.php definition (shared across every site on one Twilio
+	 * account) still works without any per-site Settings entry — see
+	 * "Sharing defaults across sites" in README.md.
+	 *
+	 *   account_sid  the real Account SID (starts with AC) — always goes in
+	 *                the URL path, regardless of which credential pair
+	 *                authenticates the request.
+	 *   sid          Basic Auth username — either that same Account SID +
+	 *                auth_token (the master auth token), OR an API Key SID
+	 *                (starts with SK) + its Secret. Twilio accepts both pairs
+	 *                equally for auth; only the URL path requires the real
+	 *                Account SID.
+	 *   from_number  the sending number, E.164 format (+1...).
+	 *
+	 * @return array{account_sid: string, sid: string, auth_token: string, from_number: string}
+	 */
+	private function get_twilio_credentials() {
+		$account_sid = trim( $this->opt( 'twilio_account_sid', '' ) );
+		if ( ! $account_sid && defined( 'WPEL_TWILIO_ACCOUNT_SID' ) ) {
+			$account_sid = WPEL_TWILIO_ACCOUNT_SID;
+		}
+		$sid = trim( $this->opt( 'twilio_sid', '' ) );
+		if ( ! $sid && defined( 'WPEL_TWILIO_SID' ) ) {
+			$sid = WPEL_TWILIO_SID;
+		}
+		$auth_token = trim( $this->opt( 'twilio_auth_token', '' ) );
+		if ( ! $auth_token && defined( 'WPEL_TWILIO_AUTH_TOKEN' ) ) {
+			$auth_token = WPEL_TWILIO_AUTH_TOKEN;
+		}
+		$from_number = trim( $this->opt( 'twilio_from_number', '' ) );
+		if ( ! $from_number && defined( 'WPEL_TWILIO_FROM_NUMBER' ) ) {
+			$from_number = WPEL_TWILIO_FROM_NUMBER;
+		}
+		return compact( 'account_sid', 'sid', 'auth_token', 'from_number' );
+	}
+
+	/**
 	 * Sends a plain-text SMS via the Twilio Messages API to every configured
 	 * recipient number. Unlike ntfy, SMS has no title/priority/click concept,
 	 * so callers fold everything (including any deep link) into one body.
 	 * Recipients need nothing beyond a phone that can receive texts — no app,
 	 * no account, no subscribing to anything.
 	 *
-	 * Credentials are wp-config.php constants only (no Settings UI/DB option):
-	 *   WPEL_TWILIO_ACCOUNT_SID  the real Account SID (starts with AC) — always
-	 *                            goes in the URL path, regardless of which
-	 *                            credential pair authenticates the request.
-	 *   WPEL_TWILIO_SID          Basic Auth username — either that same Account
-	 *                            SID + WPEL_TWILIO_AUTH_TOKEN (the master auth
-	 *                            token), OR an API Key SID (starts with SK) +
-	 *                            its Secret. Twilio accepts both pairs equally
-	 *                            for auth; only the URL path requires the real
-	 *                            Account SID.
-	 *   WPEL_TWILIO_FROM_NUMBER  the sending number, E.164 format (+1...).
-	 *
 	 * @param string $body
 	 */
 	private function notify_twilio( $body ) {
-		if ( ! defined( 'WPEL_TWILIO_ACCOUNT_SID' ) || ! defined( 'WPEL_TWILIO_SID' )
-			|| ! defined( 'WPEL_TWILIO_AUTH_TOKEN' ) || ! defined( 'WPEL_TWILIO_FROM_NUMBER' ) ) {
+		$creds = $this->get_twilio_credentials();
+		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
 			return;
 		}
 		$to_numbers = array_filter( array_map( 'trim', explode( ',', $this->opt( 'twilio_to_numbers', '' ) ) ) );
@@ -554,25 +583,107 @@ class WPEL_Mailgun_Monitor {
 			return;
 		}
 
-		$from = trim( WPEL_TWILIO_FROM_NUMBER );
-
 		foreach ( $to_numbers as $to ) {
 			wp_remote_post(
-				'https://api.twilio.com/2010-04-01/Accounts/' . WPEL_TWILIO_ACCOUNT_SID . '/Messages.json',
+				'https://api.twilio.com/2010-04-01/Accounts/' . $creds['account_sid'] . '/Messages.json',
 				array(
 					'timeout'  => 8,
 					'blocking' => false, // fire-and-forget, same as Slack before it
 					'headers'  => array(
-						'Authorization' => 'Basic ' . base64_encode( WPEL_TWILIO_SID . ':' . WPEL_TWILIO_AUTH_TOKEN ),
+						'Authorization' => 'Basic ' . base64_encode( $creds['sid'] . ':' . $creds['auth_token'] ),
 					),
 					'body'     => array(
 						'To'   => $to,
-						'From' => $from,
+						'From' => $creds['from_number'],
 						'Body' => mb_substr( $body, 0, 1500 ), // Twilio auto-segments/concatenates up to ~1600 chars
 					),
 				)
 			);
 		}
+	}
+
+	/**
+	 * Blocking Twilio send used only by the Settings page's "Send test SMS"
+	 * button. notify_twilio() above is fire-and-forget (blocking => false)
+	 * since real alerts fire from request-serving code paths that shouldn't
+	 * wait on Twilio; a manual test click can afford to wait a couple of
+	 * seconds, and doing so is the only way to hand back Twilio's actual
+	 * error message (bad number, auth failure, etc.) instead of just "sent".
+	 *
+	 * @param string $body
+	 * @return array<int, array{to: string, ok: bool, detail: string}> One
+	 *         entry per configured number, or a single not-ok entry
+	 *         explaining why nothing was attempted (not configured / no
+	 *         numbers saved).
+	 */
+	public function send_test_sms( $body ) {
+		$creds = $this->get_twilio_credentials();
+		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
+			return array(
+				array(
+					'to'     => '',
+					'ok'     => false,
+					'detail' => 'Twilio isn\'t configured — set the Account SID, SID, Auth Token and From number on the Twilio / SMS tab, or define WPEL_TWILIO_ACCOUNT_SID, WPEL_TWILIO_SID, WPEL_TWILIO_AUTH_TOKEN and WPEL_TWILIO_FROM_NUMBER in wp-config.php.',
+				),
+			);
+		}
+
+		$to_numbers = array_filter( array_map( 'trim', explode( ',', $this->opt( 'twilio_to_numbers', '' ) ) ) );
+		if ( ! $to_numbers ) {
+			return array(
+				array(
+					'to'     => '',
+					'ok'     => false,
+					'detail' => 'No alert phone numbers are saved yet — add one above, save, then try again.',
+				),
+			);
+		}
+
+		$results = array();
+
+		foreach ( $to_numbers as $to ) {
+			$response = wp_remote_post(
+				'https://api.twilio.com/2010-04-01/Accounts/' . $creds['account_sid'] . '/Messages.json',
+				array(
+					'timeout' => 15,
+					'headers' => array(
+						'Authorization' => 'Basic ' . base64_encode( $creds['sid'] . ':' . $creds['auth_token'] ),
+					),
+					'body'    => array(
+						'To'   => $to,
+						'From' => $creds['from_number'],
+						'Body' => mb_substr( $body, 0, 1500 ),
+					),
+				)
+			);
+
+			if ( is_wp_error( $response ) ) {
+				$results[] = array(
+					'to'     => $to,
+					'ok'     => false,
+					'detail' => $response->get_error_message(),
+				);
+				continue;
+			}
+
+			$code = (int) wp_remote_retrieve_response_code( $response );
+			if ( $code >= 200 && $code < 300 ) {
+				$results[] = array(
+					'to'     => $to,
+					'ok'     => true,
+					'detail' => 'Sent.',
+				);
+			} else {
+				$decoded = json_decode( wp_remote_retrieve_body( $response ), true );
+				$results[] = array(
+					'to'     => $to,
+					'ok'     => false,
+					'detail' => isset( $decoded['message'] ) ? $decoded['message'] : ( 'Twilio returned HTTP ' . $code ),
+				);
+			}
+		}
+
+		return $results;
 	}
 
 	/* -------------------------------------------------------------------- */
