@@ -200,12 +200,11 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row"><label for="wpel_test_to">Send test email</label></th>
 							<td>
-								<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-									<?php wp_nonce_field( 'wpel_send_test_email' ); ?>
-									<input type="hidden" name="action" value="wpel_send_test_email">
-									<input type="email" name="wpel_test_to" id="wpel_test_to" class="regular-text" placeholder="you@example.com" value="<?php echo esc_attr( wp_get_current_user()->user_email ); ?>" required>
-									<button type="submit" class="button">Send test email</button>
-								</form>
+								<?php // These fields submit to the standalone form below via the form="" attribute — a real <form> can't nest inside this page's main settings form. ?>
+								<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
+								<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
+								<input type="email" name="wpel_test_to" id="wpel_test_to" class="regular-text" placeholder="you@example.com" value="<?php echo esc_attr( wp_get_current_user()->user_email ); ?>" form="wpel-test-email-form" required>
+								<button type="submit" class="button" form="wpel-test-email-form">Send test email</button>
 								<p class="description">Sends a real email through this settings page's current saved configuration and logs it like any other send.</p>
 							</td>
 						</tr>
@@ -280,6 +279,8 @@ class WPEL_Admin {
 
 				<?php submit_button(); ?>
 			</form>
+
+			<form id="wpel-test-email-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"></form>
 
 			</div>
 			<?php $this->render_setup_checklist( $o ); ?>
