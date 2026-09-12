@@ -61,28 +61,101 @@ class WPEL_Admin {
 
 	/**
 	 * Keeps only entries that pass is_email() so a typo sits out of the
-	 * option instead of silently failing every alert email later.
+	 * option instead of silently failing every alert email later. Reports
+	 * any entry it drops via add_settings_error() so it doesn't just vanish
+	 * with no explanation.
 	 */
 	private function sanitize_email_list( $raw ) {
-		$emails = array_map( 'sanitize_email', array_map( 'trim', explode( ',', (string) $raw ) ) );
-		$valid  = array_filter( $emails, 'is_email' );
+		$entries = array_filter( array_map( 'trim', explode( ',', (string) $raw ) ) );
+		$valid   = array();
+		$invalid = array();
+		foreach ( $entries as $entry ) {
+			$cleaned = sanitize_email( $entry );
+			if ( is_email( $cleaned ) ) {
+				$valid[] = $cleaned;
+			} else {
+				$invalid[] = $entry;
+			}
+		}
+		if ( $invalid ) {
+			add_settings_error(
+				WPEL_OPTION,
+				'wpel_invalid_email',
+				sprintf(
+					/* translators: %s: comma-separated list of rejected email addresses */
+					__( 'These alert email addresses were removed because they\'re not valid: %s', 'wpel' ),
+					esc_html( implode( ', ', $invalid ) )
+				),
+				'error'
+			);
+		}
 		return implode( ', ', $valid );
 	}
 
 	/**
-	 * Keeps only entries that look like E.164 numbers (+ followed by 7-15
-	 * digits) so a typo sits out of the option instead of silently failing
-	 * every Twilio call later.
+	 * Converts each entry to E.164 (+ followed by 7-15 digits) so users can
+	 * type numbers the way they normally would instead of learning the
+	 * format. A bare 10-digit number is assumed US/Canada (this plugin's
+	 * Twilio setup targets US numbers) and gets "+1" prepended; an 11-digit
+	 * number starting with 1 just gets the "+"; anything already carrying a
+	 * "+" or the "00" international prefix is taken as already having its
+	 * country code. Whatever still doesn't come out looking like a valid
+	 * E.164 number is dropped, reported via add_settings_error() so it
+	 * doesn't just vanish with no explanation.
 	 */
 	private function sanitize_phone_list( $raw ) {
-		$numbers = array_map( 'trim', explode( ',', (string) $raw ) );
-		$valid   = array_filter(
-			$numbers,
-			function ( $n ) {
-				return (bool) preg_match( '/^\+[1-9]\d{6,14}$/', $n );
+		$numbers = array_filter( array_map( 'trim', explode( ',', (string) $raw ) ) );
+		$valid   = array();
+		$invalid = array();
+		foreach ( $numbers as $n ) {
+			$normalized = $this->normalize_phone_to_e164( $n );
+			if ( preg_match( '/^\+[1-9]\d{6,14}$/', $normalized ) ) {
+				$valid[] = $normalized;
+			} else {
+				$invalid[] = $n;
 			}
-		);
+		}
+		if ( $invalid ) {
+			add_settings_error(
+				WPEL_OPTION,
+				'wpel_invalid_phone',
+				sprintf(
+					/* translators: %s: comma-separated list of rejected phone numbers */
+					__( 'These alert phone numbers were removed because they don\'t look like valid phone numbers: %s', 'wpel' ),
+					esc_html( implode( ', ', $invalid ) )
+				),
+				'error'
+			);
+		}
 		return implode( ', ', $valid );
+	}
+
+	/**
+	 * Best-effort normalization of a user-typed phone number to E.164.
+	 * Can't reliably guess a country code for numbers that don't provide
+	 * one and aren't 10/11-digit US/Canada numbers — those are returned
+	 * as-is (digits only, "+" prefixed) and left for the caller to reject.
+	 */
+	private function normalize_phone_to_e164( $raw ) {
+		$n = trim( (string) $raw );
+		if ( '' === $n ) {
+			return '';
+		}
+		$has_plus = ( 0 === strpos( $n, '+' ) );
+		$digits   = preg_replace( '/\D/', '', $n );
+		if ( $has_plus ) {
+			return '+' . $digits;
+		}
+		if ( 0 === strpos( $digits, '00' ) ) {
+			return '+' . substr( $digits, 2 );
+		}
+		if ( 10 === strlen( $digits ) ) {
+			return '+1' . $digits;
+		}
+		if ( 11 === strlen( $digits ) && '1' === $digits[0] ) {
+			return '+' . $digits;
+		}
+		return '+' . $digits;
 	}
 
 	/**
@@ -154,6 +227,8 @@ class WPEL_Admin {
 		?>
 		<div class="wrap">
 			<h1>Settings</h1>
+
+			<?php settings_errors( WPEL_OPTION ); ?>
 
 			<div class="wpel-settings-columns">
 			<div class="wpel-settings-main">
@@ -231,10 +306,9 @@ class WPEL_Admin {
 						*/ ?>
 						<tr>
 							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="+15551234567, +15559876543">
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
 							<p class="description">
-								Failure, outage, and unopened-email alerts are texted to every number here (comma-separated, <a href="https://www.twilio.com/docs/glossary/what-e164" target="_blank">E.164 format</a>, e.g. <code>+15551234567</code>). Recipients don't install anything or sign up for anything — a text just arrives on their phone.
-								On a Twilio trial account, each number must first be verified in the Twilio Console before it can receive texts; a paid account can text any number.
+								Failure, outage, and unopened-email alerts are texted to every number here (comma-separated).
 							</p></td>
 						</tr>
 						<tr>
@@ -452,7 +526,7 @@ class WPEL_Admin {
 							<br><a href="https://app.mailgun.com/mg/sending/mg.abpdaily.com/webhooks/account-level?tab=account-level" target="_blank">Get signing key &rarr;</a>
 						</li>
 						<li><?php echo $todo; // never auto-checkable — lives entirely in Mailgun's dashboard, phpcs:ignore WordPress.Security.EscapeOutput ?>
-							In Mailgun, open this domain &rarr; <strong>Webhooks</strong> &rarr; add an HTTP webhook subscribed to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> (+ <code>opened</code> if tracking is on), pointing at:
+							In Mailgun, open this domain &rarr; <strong>Webhooks</strong> &rarr; add an HTTP webhook subscribed to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
 							<br><code style="word-break:break-all;display:inline-block;margin:4px 0;"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
 							<br><a href="https://app.mailgun.com/mg/sending/domains" target="_blank">Open domains &rarr;</a>
 							<br><em>Not checkable from here — confirm it's actually saved in Mailgun.</em>
