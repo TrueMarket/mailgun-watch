@@ -1,0 +1,5 @@
+# Normalize line endings across machines.
+# Git stores text files as LF in the repo and checks them out with the
+# platform's native endings, so line-ending differences never show up as
+# changes again. Binary files are auto-detected and left untouched.
+* text=auto

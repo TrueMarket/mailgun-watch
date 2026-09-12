@@ -1,0 +1,21 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+
+# Keep .vscode out of the repo (local editor settings)
+.vscode/
+
+# Dependencies that are managed elsewhere
+node_modules/
+
+# Build / logs / env
+*.log
+.env
+.env.*
+
+# Note: vendor/ is intentionally NOT ignored.
+# The plugin-update-checker library is bundled with the plugin and must ship
+# inside the release.
