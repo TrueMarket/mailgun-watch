@@ -91,4 +91,15 @@ Since the repo is private, each site needs a read-only GitHub token to check for
    define( 'WPEL_GITHUB_TOKEN', 'github_pat_...' );
    ```
 
-To ship a new version: bump `Version:` in the file header and `WPEL_VERSION` together, commit, then tag and push (e.g. `git tag v2.3.0 && git push origin v2.3.0`).
+### Releasing a new version
+
+To ship an update, paste this to Claude Code (or follow it by hand):
+
+```
+Release a new version of this plugin. Bump the Version header and
+WPEL_VERSION in mailgun-email-monitor.php together (patch bump unless
+I say otherwise), commit, then tag the commit vX.Y.Z to match and push
+both main and the tag to origin.
+```
+
+That's: bump `Version:` in the file header and `WPEL_VERSION` together, commit, then tag and push — e.g. `git tag v2.3.0 && git push origin main && git push origin v2.3.0`.
