@@ -93,13 +93,21 @@ Since the repo is private, each site needs a read-only GitHub token to check for
 
 ### Releasing a new version
 
-To ship an update, paste this to Claude Code (or follow it by hand):
+To ship an update, paste this to Claude Code (fill in the changelog notes), or follow it by hand:
 
 ```
 Release a new version of this plugin. Bump the Version header and
 WPEL_VERSION in mailgun-email-monitor.php together (patch bump unless
-I say otherwise), commit, then tag the commit vX.Y.Z to match and push
-both main and the tag to origin.
+I say otherwise). Add a new entry at the top of the == Changelog ==
+section in readme.txt for that version with these notes:
+
+- <note 1>
+- <note 2>
+
+Commit everything, tag the commit vX.Y.Z to match, and push both main
+and the tag to origin.
 ```
 
-That's: bump `Version:` in the file header and `WPEL_VERSION` together, commit, then tag and push — e.g. `git tag v2.3.0 && git push origin main && git push origin v2.3.0`.
+The changelog notes matter, not just as documentation — they're what WordPress shows in the "View version X.X details" popup on the Plugins screen, since the update checker reads them straight out of `readme.txt`'s `== Changelog ==` section for whichever tag it's looking at.
+
+That's: bump `Version:` in the file header and `WPEL_VERSION` together, add the changelog entry to `readme.txt`, commit, then tag and push — e.g. `git tag v2.3.0 && git push origin main && git push origin v2.3.0`.
