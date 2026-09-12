@@ -141,6 +141,13 @@ function wpel_init_updater() {
 	// branch, PUC prefers GitHub releases/tags over raw branch commits.
 	$update_checker->setBranch( 'main' );
 
+	// The GitHub repo is private, so a token is required to read releases/tags.
+	// Define this in wp-config.php (fine-grained PAT, "Contents: Read-only",
+	// scoped to just this repo) — same pattern as WPEL_MAILGUN_SIGNING_KEY etc.
+	if ( defined( 'WPEL_GITHUB_TOKEN' ) && WPEL_GITHUB_TOKEN ) {
+		$update_checker->setAuthentication( WPEL_GITHUB_TOKEN );
+	}
+
 	// If you attach a built .zip to each GitHub release (rather than letting
 	// PUC use the auto-generated source archive), uncomment the next line so
 	// updates download that asset instead:

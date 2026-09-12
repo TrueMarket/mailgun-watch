@@ -78,3 +78,17 @@ There's no such shortcut for the Mailgun API key/domain, From address, or the Tw
 - `wp_mail_succeeded` / `wp_mail_failed` don't fire natively for Mailgun-sent mail (short-circuiting `pre_wp_mail` skips the rest of core's `wp_mail()`), so third-party plugins that hook those directly won't see Mailgun sends. Monitor still catches failures independently via `WPEL_Mailer::mark_failed_and_alert()`.
 - `blocking => false` is used for the Twilio API call so a slow response never stalls a page load.
 - On a Twilio trial account, each "to" number must be verified in the Twilio Console before it can receive SMS; upgrade to a paid account to text arbitrary numbers. For any real US SMS volume, Twilio may also require A2P 10DLC brand/campaign registration for the sending number to avoid carrier filtering — low-volume ops alerts to a handful of numbers typically work unregistered, but this is worth checking if messages start getting silently dropped.
+
+## Updates
+
+This plugin ships with the [Plugin Update Checker](https://github.com/YahnisElsts/plugin-update-checker) library and checks the private `TrueMarket/mailgun-watch` GitHub repo for new tagged releases, surfacing them on the Plugins screen like any wordpress.org plugin.
+
+Since the repo is private, each site needs a read-only GitHub token to check for updates:
+
+1. Create a fine-grained personal access token at GitHub → Settings → Developer settings → Personal access tokens, scoped to only the `mailgun-watch` repo with **Contents: Read-only** permission.
+2. Add it to `wp-config.php`:
+   ```php
+   define( 'WPEL_GITHUB_TOKEN', 'github_pat_...' );
+   ```
+
+To ship a new version: bump `Version:` in the file header and `WPEL_VERSION` together, commit, then tag and push (e.g. `git tag v2.3.0 && git push origin v2.3.0`).
