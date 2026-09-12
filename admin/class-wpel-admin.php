@@ -24,6 +24,8 @@ class WPEL_Admin {
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 		add_action( 'admin_post_wpel_send_test_email', array( $this, 'handle_send_test_email' ) );
 		add_action( 'admin_notices', array( $this, 'test_email_notice' ) );
+		add_action( 'admin_post_wpel_check_mailgun_config', array( $this, 'handle_check_mailgun_config' ) );
+		add_action( 'admin_notices', array( $this, 'mailgun_config_check_notice' ) );
 	}
 
 	public function register_settings() {
@@ -200,6 +202,225 @@ class WPEL_Admin {
 		} else {
 			echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( 'Test email failed to send. Check the Email Log for the error, and verify your Mailgun API key/domain.', 'wpel' ) . '</p></div>';
 		}
+	}
+
+	/**
+	 * Asks Mailgun itself (not just our saved options) whether this site is
+	 * wired up correctly: that the API key/domain pair is valid and verified,
+	 * and that Mailgun's webhook for this domain is actually pointed at this
+	 * site's REST endpoint for every event we need. This is the one setup
+	 * step the sidebar checklist can't verify locally, since webhook
+	 * registration lives entirely in Mailgun's dashboard.
+	 */
+	public function handle_check_mailgun_config() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wpel' ) );
+		}
+		check_admin_referer( 'wpel_check_mailgun_config' );
+
+		$o       = get_option( WPEL_OPTION, array() );
+		$results = $this->run_mailgun_config_check( $o );
+
+		set_transient( 'wpel_mailgun_check_' . get_current_user_id(), $results, MINUTE_IN_SECONDS );
+
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'         => 'wpel-settings',
+					'wpel_checked' => '1',
+				),
+				admin_url( 'admin.php' )
+			)
+		);
+		exit;
+	}
+
+	/**
+	 * Runs the actual Mailgun API calls behind "Check Mailgun config".
+	 * Returns a list of { label, ok, detail } — stops early (returning just
+	 * the failed step) once a check fails badly enough that later checks
+	 * can't be trusted, e.g. no point checking webhooks if the API key
+	 * itself was rejected.
+	 */
+	private function run_mailgun_config_check( $o ) {
+		$api_key = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
+		$domain  = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
+
+		if ( ! $api_key || ! $domain ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'Enter both a Mailgun API key and sending domain on the Mailgun Sending tab first.',
+				),
+			);
+		}
+
+		$auth = 'Basic ' . base64_encode( 'api:' . $api_key );
+		$base = WPEL_Mailer::API_BASE . '/domains/' . rawurlencode( $domain );
+
+		$domain_response = wp_remote_get( $base, array( 'timeout' => 15, 'headers' => array( 'Authorization' => $auth ) ) );
+
+		if ( is_wp_error( $domain_response ) ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'Could not reach Mailgun: ' . $domain_response->get_error_message(),
+				),
+			);
+		}
+
+		$code = (int) wp_remote_retrieve_response_code( $domain_response );
+
+		if ( 401 === $code || 403 === $code ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'Mailgun rejected the API key (HTTP ' . $code . ').',
+				),
+			);
+		}
+		if ( 404 === $code ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'The API key is valid, but no domain named "' . $domain . '" exists on this Mailgun account.',
+				),
+			);
+		}
+		if ( $code < 200 || $code >= 300 ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'Unexpected response from Mailgun (HTTP ' . $code . ').',
+				),
+			);
+		}
+
+		$body    = json_decode( wp_remote_retrieve_body( $domain_response ), true );
+		$state   = isset( $body['domain']['state'] ) ? $body['domain']['state'] : '';
+		$checks  = array();
+
+		if ( 'active' === $state ) {
+			$checks[] = array(
+				'label'  => 'API key & domain',
+				'ok'     => true,
+				'detail' => 'Domain "' . $domain . '" found and verified in Mailgun.',
+			);
+		} else {
+			$checks[] = array(
+				'label'  => 'API key & domain',
+				'ok'     => false,
+				'detail' => 'Domain "' . $domain . '" exists but its state is "' . ( $state ? $state : 'unknown' ) . '" — its DNS records probably aren\'t verified in Mailgun yet.',
+			);
+		}
+
+		// Webhooks — only meaningful once the domain itself resolved above.
+		$our_url        = untrailingslashit( rest_url( 'wpel/v1/mailgun-webhook' ) );
+		$hooks_response = wp_remote_get( $base . '/webhooks', array( 'timeout' => 15, 'headers' => array( 'Authorization' => $auth ) ) );
+
+		if ( is_wp_error( $hooks_response ) ) {
+			$checks[] = array(
+				'label'  => 'Webhook registration',
+				'ok'     => false,
+				'detail' => 'Could not reach Mailgun: ' . $hooks_response->get_error_message(),
+			);
+			return $checks;
+		}
+
+		$hcode = (int) wp_remote_retrieve_response_code( $hooks_response );
+		$hbody = json_decode( wp_remote_retrieve_body( $hooks_response ), true );
+
+		if ( $hcode < 200 || $hcode >= 300 || empty( $hbody['webhooks'] ) ) {
+			$checks[] = array(
+				'label'  => 'Webhook registration',
+				'ok'     => false,
+				'detail' => 'Could not read webhook settings from Mailgun (HTTP ' . $hcode . ').',
+			);
+			return $checks;
+		}
+
+		$required = array( 'accepted', 'delivered', 'permanent_fail' );
+		if ( ! empty( $o['track_opens'] ) ) {
+			$required[] = 'opened';
+		}
+
+		$missing = array();
+		foreach ( $required as $event ) {
+			$urls = array();
+			if ( ! empty( $hbody['webhooks'][ $event ]['url'] ) ) {
+				$urls = (array) $hbody['webhooks'][ $event ]['url'];
+			} elseif ( ! empty( $hbody['webhooks'][ $event ]['urls'] ) ) {
+				$urls = (array) $hbody['webhooks'][ $event ]['urls'];
+			}
+			$subscribed = false;
+			foreach ( $urls as $u ) {
+				if ( untrailingslashit( (string) $u ) === $our_url ) {
+					$subscribed = true;
+					break;
+				}
+			}
+			if ( ! $subscribed ) {
+				$missing[] = $event;
+			}
+		}
+
+		if ( $missing ) {
+			$checks[] = array(
+				'label'  => 'Webhook registration',
+				'ok'     => false,
+				'detail' => 'This site\'s webhook URL isn\'t subscribed to: ' . implode( ', ', $missing ) . '. In Mailgun, open this domain → Webhooks and point (or add) those events at: ' . $our_url,
+			);
+		} else {
+			$checks[] = array(
+				'label'  => 'Webhook registration',
+				'ok'     => true,
+				'detail' => 'This site\'s webhook URL is subscribed to all required events (' . implode( ', ', $required ) . ').',
+			);
+		}
+
+		return $checks;
+	}
+
+	/**
+	 * Displays the results of "Check Mailgun config" once, right after the
+	 * redirect it triggers — stored transiently since the results are too
+	 * detailed to round-trip through the URL like test_email_notice() does.
+	 */
+	public function mailgun_config_check_notice() {
+		if ( ! isset( $_GET['wpel_checked'], $_GET['page'] ) || 'wpel-settings' !== $_GET['page'] ) {
+			return;
+		}
+
+		$key     = 'wpel_mailgun_check_' . get_current_user_id();
+		$results = get_transient( $key );
+		if ( false === $results || ! is_array( $results ) ) {
+			return;
+		}
+		delete_transient( $key );
+
+		$all_ok = true;
+		foreach ( $results as $r ) {
+			if ( empty( $r['ok'] ) ) {
+				$all_ok = false;
+				break;
+			}
+		}
+		?>
+		<div class="notice <?php echo $all_ok ? 'notice-success' : 'notice-warning'; ?> is-dismissible">
+			<p><strong><?php echo $all_ok ? 'Mailgun config check passed.' : 'Mailgun config check found issues:'; ?></strong></p>
+			<ul style="margin-left:1.5em;list-style:disc;">
+				<?php foreach ( $results as $r ) : ?>
+					<li><?php echo ! empty( $r['ok'] ) ? '&#9989;' : '&#10060;'; // phpcs:ignore WordPress.Security.EscapeOutput ?> <strong><?php echo esc_html( $r['label'] ); ?>:</strong> <?php echo esc_html( $r['detail'] ); ?></li>
+				<?php endforeach; ?>
+			</ul>
+			<p class="description">Note: the webhook signing key can't be verified this way — Mailgun doesn't expose it via the API. Send a test email and check the Email Log to confirm signed webhook calls are being accepted.</p>
+		</div>
+		<?php
 	}
 
 	public function admin_menu() {
@@ -509,6 +730,12 @@ class WPEL_Admin {
 				<h2 class="hndle" style="padding:10px 12px;margin:0;font-size:14px;">New site setup checklist</h2>
 				<div style="padding:4px 12px 12px;">
 					<p class="description">Run through this every time the plugin is installed on a new site.</p>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin:0 0 12px;">
+						<?php wp_nonce_field( 'wpel_check_mailgun_config' ); ?>
+						<input type="hidden" name="action" value="wpel_check_mailgun_config">
+						<button type="submit" class="button button-secondary"><?php esc_html_e( 'Check Mailgun config', 'wpel' ); ?></button>
+						<p class="description" style="margin-top:4px;">Asks Mailgun directly whether the API key/domain are valid and the webhook below is actually subscribed — covers steps 1, 2 and 5.</p>
+					</form>
 					<ol style="padding-left:18px;">
 						<li><?php echo $has_domain ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							Create a <strong>dedicated</strong> Mailgun sending domain for this site — never reuse a domain already wired to another site's webhook (see warning below).
