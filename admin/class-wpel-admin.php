@@ -510,7 +510,7 @@ class WPEL_Admin {
 			$checks[] = array(
 				'label'  => 'Webhook registration',
 				'ok'     => false,
-				'detail' => 'This site\'s webhook URL isn\'t subscribed to: ' . implode( ', ', $missing ) . '. In Mailgun, go to Send → Webhooks → Add webhook → Domain-level, pick this domain, and point (or add) those events at:' . $our_url,
+				'detail' => 'This site\'s webhook URL isn\'t subscribed to: ' . implode( ', ', $missing ) . '. In Mailgun, go to Send → Webhooks → Add webhook → Domain-level, pick this domain, and point (or add) those events at: ' . $our_url,
 			);
 		} else {
 			$checks[] = array(
