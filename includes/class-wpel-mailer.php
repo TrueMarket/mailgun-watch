@@ -44,7 +44,7 @@ class WPEL_Mailer {
 		// Missing key (e.g. an install that activated before this option existed)
 		// defaults to enabled — the toggle is opt-out, not opt-in.
 		$this->enabled    = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
-		$this->api_key    = wpel_shared_credential( 'WPEL_MAILGUN_API_KEY', 'api_key' );
+		$this->api_key    = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
 		$this->domain     = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
 		$this->from_email = isset( $o['from_email'] ) && $o['from_email'] ? $o['from_email'] : get_option( 'admin_email' );
 		$this->from_name  = isset( $o['from_name'] ) && $o['from_name'] ? $o['from_name'] : wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );

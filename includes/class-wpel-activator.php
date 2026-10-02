@@ -78,9 +78,10 @@ class WPEL_Activator {
 		// Seed default settings if empty.
 		$defaults = array(
 			// Mailgun API sending (replaces WP Mail SMTP / any other SMTP plugin).
-			// The API key, signing key and Twilio credentials come from
-			// wp-config.php instead — see wpel_shared_credential().
+			// The signing key and Twilio credentials come from wp-config.php
+			// instead — see wpel_shared_credential().
 			'sending_enabled'  => 1,
+			'api_key'          => '',
 			'domain'           => '',
 			'from_email'       => get_option( 'admin_email' ),
 			'from_name'        => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),

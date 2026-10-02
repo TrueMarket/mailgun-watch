@@ -11,6 +11,7 @@ Sends every outgoing WordPress email directly through the **Mailgun HTTP API** �
 3. Deactivate WP Mail SMTP (or any other SMTP plugin) — this plugin replaces it as the mail transport. Leaving one active alongside this plugin is harmless (this plugin's `pre_wp_mail` hook wins), but there's no reason to keep it.
 4. Add the shared credentials to `wp-config.php` — see [Shared credentials (wp-config.php)](#shared-credentials-wp-configphp). They're the same on every site, so they aren't in Settings.
 5. Go to **Mailgun Watch → Settings** (two tabs: **Mailgun Sending** and **Alerting & Logging**) and fill in:
+   - **Mailgun API key** — create a separate key for each site (Mailgun → *Settings → API Keys*) so one site's key can be revoked without affecting the others. Use a full API key, not a domain sending key.
    - **Mailgun sending domain** (US region only) — a dedicated one for this site
    - **Default from name/email** — must be on a domain verified in Mailgun, or sends are rejected
    - **Alert email recipient**
@@ -55,7 +56,6 @@ Thresholds, retention, and whether to store message bodies are all on the Settin
 Credentials that are the same on every site live only in `wp-config.php` and aren't shown in Settings. Copy the same block into each site's `wp-config.php`:
 
 ```php
-define( 'WPEL_MAILGUN_API_KEY', 'Mailgun private API key' );               // Mailgun → Settings → API Keys. Use the account key, not a domain sending key.
 define( 'WPEL_MAILGUN_SIGNING_KEY', 'account-level HTTP webhook signing key' );
 define( 'WPEL_SLACK_WEBHOOK', 'https://hooks.slack.com/services/...' ); // unused while Slack alerting is disabled
 

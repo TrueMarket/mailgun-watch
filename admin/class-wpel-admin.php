@@ -47,7 +47,8 @@ class WPEL_Admin {
 		$out = array();
 		// Mailgun API sending.
 		$out['sending_enabled']  = ! empty( $input['sending_enabled'] ) ? 1 : 0;
-		$out['domain']           = sanitize_text_field( isset( $input['domain'] ) ? $input['domain'] : '' );
+		$out['api_key']          = sanitize_text_field( isset( $input['api_key'] ) ? $input['api_key'] : '' );
+		$out['domain']          = sanitize_text_field( isset( $input['domain'] ) ? $input['domain'] : '' );
 		$out['from_name']        = sanitize_text_field( isset( $input['from_name'] ) ? $input['from_name'] : '' );
 		$out['from_email']       = sanitize_email( isset( $input['from_email'] ) ? $input['from_email'] : '' );
 		$out['force_from']       = ! empty( $input['force_from'] ) ? 1 : 0;
@@ -60,7 +61,7 @@ class WPEL_Admin {
 		// Shared credentials now come from wp-config.php and have no field here.
 		// Carry over any value an older version saved, so wpel_shared_credential()
 		// can still fall back to it on sites that haven't added the constant yet.
-		foreach ( array( 'api_key', 'signing_key', 'twilio_account_sid', 'twilio_sid', 'twilio_auth_token', 'twilio_from_number' ) as $legacy_key ) {
+		foreach ( array( 'signing_key','twilio_account_sid', 'twilio_sid', 'twilio_auth_token', 'twilio_from_number' ) as $legacy_key ) {
 			if ( ! empty( $previous[ $legacy_key ] ) ) {
 				$out[ $legacy_key ] = $previous[ $legacy_key ];
 			}
@@ -74,9 +75,10 @@ class WPEL_Admin {
 		$out['unopened_hours']   = max( 1, (int) ( isset( $input['unopened_hours'] ) ? $input['unopened_hours'] : 24 ) );
 
 		// A previously-passing webhook check or test send no longer proves
-		// anything once the domain they were run against changes.
-		$prev_domain = isset( $previous['domain'] ) ? $previous['domain'] : '';
-		if ( $prev_domain !== $out['domain'] ) {
+		// anything once the API key or domain they were run against changes.
+		$prev_api_key = isset( $previous['api_key'] ) ? $previous['api_key'] : '';
+		$prev_domain  = isset( $previous['domain'] ) ? $previous['domain'] : '';
+		if ( $prev_api_key !== $out['api_key'] || $prev_domain !== $out['domain'] ) {
 			$this->update_setup_status(
 				array(
 					'webhook_verified' => false,
@@ -378,24 +380,15 @@ class WPEL_Admin {
 	 * itself was rejected.
 	 */
 	private function run_mailgun_config_check( $o ) {
-		$api_key = wpel_shared_credential( 'WPEL_MAILGUN_API_KEY', 'api_key' );
+		$api_key = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
 		$domain  = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
 
-		if ( ! $api_key ) {
+		if ( ! $api_key || ! $domain ) {
 			return array(
 				array(
 					'label'  => 'API key & domain',
 					'ok'     => false,
-					'detail' => 'Define WPEL_MAILGUN_API_KEY in wp-config.php first.',
-				),
-			);
-		}
-		if ( ! $domain ) {
-			return array(
-				array(
-					'label'  => 'API key & domain',
-					'ok'     => false,
-					'detail' => 'Enter a sending domain on the Mailgun Sending tab first.',
+					'detail' => 'Enter both a Mailgun API key and sending domain on the Mailgun Sending tab first.',
 				),
 			);
 		}
@@ -612,6 +605,11 @@ class WPEL_Admin {
 							<th scope="row">Send via Mailgun API</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sending_enabled]" value="1" <?php checked( $sending_enabled ); ?>> Enabled - this plugin is the mail transport (no SMTP plugin needed)</label>
 							<p class="description">When off, WordPress falls back to its default transport (usually PHP <code>mail()</code>), which most hosts don't deliver reliably.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_api_key">Mailgun API key</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[api_key]" id="wpel_api_key" type="password" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['api_key'] ) ? $o['api_key'] : '' ); ?>">
+							<p class="description">Your Mailgun API key. Create one <a href="https://app.mailgun.com/settings/api_security" target="_blank">here</a></p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_domain">Mailgun sending domain</label></th>
@@ -843,6 +841,7 @@ class WPEL_Admin {
 	private function render_setup_checklist( $o ) {
 		$status          = $this->get_setup_status();
 		$has_domain      = ! empty( $o['domain'] );
+		$has_api_key     = ! empty( $o['api_key'] );
 		$has_from_email  = ! empty( $o['from_email'] );
 		$has_webhook     = ! empty( $status['webhook_verified'] );
 		$has_alerts      = ! empty( $o['alert_email'] ) || ! empty( $o['twilio_to_numbers'] );
@@ -851,7 +850,6 @@ class WPEL_Admin {
 		// Shared credentials (see wpel_shared_credential()) — Twilio's only
 		// matter once this site actually has phone numbers to text.
 		$required = array(
-			'WPEL_MAILGUN_API_KEY'     => array( 'api_key', 'Mailgun private API key' ),
 			'WPEL_MAILGUN_SIGNING_KEY' => array( 'signing_key', 'Mailgun HTTP webhook signing key' ),
 		);
 		if ( ! empty( $o['twilio_to_numbers'] ) ) {
@@ -869,7 +867,7 @@ class WPEL_Admin {
 			}
 		}
 
-		$all_done        = ! $missing && $has_domain && $has_from_email
+		$all_done        = ! $missing && $has_domain && $has_api_key && $has_from_email
 			&& $has_webhook && $has_alerts && $has_test_email;
 		$done            = '&#9989;';
 		$todo            = '&#11036;';
@@ -893,12 +891,16 @@ class WPEL_Admin {
 						<?php wp_nonce_field( 'wpel_check_mailgun_config' ); ?>
 						<input type="hidden" name="action" value="wpel_check_mailgun_config">
 						<button type="submit" class="button button-secondary"><?php esc_html_e( 'Check Mailgun config', 'wpel' ); ?></button>
-						<p class="description" style="margin-top:4px;">Checks with Mailgun that the domain is valid and the webhook is set up (steps 1 and 3).</p>
+						<p class="description" style="margin-top:4px;">Checks with Mailgun that the domain and API key are valid and the webhook is set up (steps 1, 2 and 4).</p>
 					</form>
 					<ol style="padding-left:18px;">
 						<li><?php echo $has_domain ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							Create a <strong>dedicated</strong> Mailgun sending domain for this site and enter it on the <strong>Mailgun Sending</strong> tab. Never reuse another site's domain (see below).
 							<br><a href="https://app.mailgun.com/mg/sending/new-domain" target="_blank">Add domain &rarr;</a>
+						</li>
+						<li><?php echo $has_api_key ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
+							Create a Mailgun API key just for this site and paste it on the <strong>Mailgun Sending</strong> tab, so it can be revoked on its own.
+							<br><a href="https://app.mailgun.com/settings/api_security" target="_blank">Create API key &rarr;</a>
 						</li>
 						<li><?php echo $has_from_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							Set a default From name/email on that domain, and turn on <strong>Force from address</strong>.

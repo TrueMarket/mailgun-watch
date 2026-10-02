@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.6
+ * Version:     2.2.7
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -75,10 +75,11 @@
  * SETUP CHECKLIST (see the Settings page):
  *   - Define the shared credentials in wp-config.php (same on every site,
  *     not shown in Settings — see wpel_shared_credential()):
- *     WPEL_MAILGUN_API_KEY, WPEL_MAILGUN_SIGNING_KEY, and for SMS
- *     WPEL_TWILIO_ACCOUNT_SID / WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN /
- *     WPEL_TWILIO_FROM_NUMBER.
- *   - Enter this site's Mailgun sending domain (US region only).
+ *     WPEL_MAILGUN_SIGNING_KEY, and for SMS WPEL_TWILIO_ACCOUNT_SID /
+ *     WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN / WPEL_TWILIO_FROM_NUMBER.
+ *   - Enter this site's Mailgun sending domain (US region only) and a
+ *     Mailgun API key created just for this site (so it can be revoked
+ *     without affecting other sites).
  *   - Set the default From name/email (must be on a domain verified in Mailgun).
  *   - On the Alerting & Logging tab, set the alert email recipient and/or
  *     the phone number(s) that should receive SMS alerts.
@@ -101,19 +102,20 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.6' );
+define( 'WPEL_VERSION', '2.2.7' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );
 
 /**
- * Credentials that are the same on every site (Mailgun API key + webhook
- * signing key, Twilio credentials) live only in wp-config.php and aren't
- * shown in Settings. Falls back to a value saved in Settings by an older
- * version of this plugin, so existing sites keep working until the
- * constant is added.
+ * Credentials that are the same on every site (Mailgun webhook signing
+ * key, Twilio credentials) live only in wp-config.php and aren't shown in
+ * Settings. Falls back to a value saved in Settings by an older version of
+ * this plugin, so existing sites keep working until the constant is added.
+ * The Mailgun API key is deliberately not one of these: each site gets its
+ * own, saved in Settings, so it can be revoked on its own.
  *
- * @param string $constant   e.g. 'WPEL_MAILGUN_API_KEY'.
+ * @param string $constant   e.g. 'WPEL_MAILGUN_SIGNING_KEY'.
  * @param string $legacy_key Matching key in the WPEL_OPTION array.
  * @return string
  */
