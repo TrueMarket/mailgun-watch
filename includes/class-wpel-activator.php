@@ -78,8 +78,9 @@ class WPEL_Activator {
 		// Seed default settings if empty.
 		$defaults = array(
 			// Mailgun API sending (replaces WP Mail SMTP / any other SMTP plugin).
+			// The API key, signing key and Twilio credentials come from
+			// wp-config.php instead — see wpel_shared_credential().
 			'sending_enabled'  => 1,
-			'api_key'          => '',
 			'domain'           => '',
 			'from_email'       => get_option( 'admin_email' ),
 			'from_name'        => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
@@ -88,14 +89,7 @@ class WPEL_Activator {
 			// Logging + alerting.
 			'alert_email'      => get_option( 'admin_email' ),
 			'slack_webhook'    => '', // saved but currently unused -- Slack alerting is disabled and hidden
-			// Twilio credentials: Settings overrides the matching wp-config.php
-			// constant when set (see get_twilio_credentials() in class-wpel-monitor.php).
-			'twilio_account_sid' => '',
-			'twilio_sid'         => '',
-			'twilio_auth_token'  => '',
-			'twilio_from_number' => '',
 			'twilio_to_numbers' => '',
-			'signing_key'      => '',
 			'store_body'       => 0,
 			'retention_days'   => 30,
 			'alert_temp_fail'  => 0,

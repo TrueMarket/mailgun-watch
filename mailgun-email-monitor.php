@@ -73,17 +73,15 @@
  *     in favor of Twilio SMS. Uncomment them to re-enable it alongside SMS.
  *
  * SETUP CHECKLIST (see the Settings page):
- *   - Paste your Mailgun API key and sending domain (US region only).
+ *   - Define the shared credentials in wp-config.php (same on every site,
+ *     not shown in Settings — see wpel_shared_credential()):
+ *     WPEL_MAILGUN_API_KEY, WPEL_MAILGUN_SIGNING_KEY, and for SMS
+ *     WPEL_TWILIO_ACCOUNT_SID / WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN /
+ *     WPEL_TWILIO_FROM_NUMBER.
+ *   - Enter this site's Mailgun sending domain (US region only).
  *   - Set the default From name/email (must be on a domain verified in Mailgun).
- *   - Paste your Mailgun HTTP webhook signing key.
- *   - Set the Twilio Account SID / SID / Auth Token / From number on the
- *     Settings page's Twilio / SMS tab, or define WPEL_TWILIO_ACCOUNT_SID /
- *     WPEL_TWILIO_SID / WPEL_TWILIO_AUTH_TOKEN / WPEL_TWILIO_FROM_NUMBER in
- *     wp-config.php to share one Twilio account across sites (Settings
- *     overrides the constant per-field — see get_twilio_credentials() in
- *     includes/class-wpel-monitor.php), then list the phone number(s) that
- *     should receive SMS alerts on that same tab.
- *   - Set the alert email recipient.
+ *   - On the Alerting & Logging tab, set the alert email recipient and/or
+ *     the phone number(s) that should receive SMS alerts.
  *   - In the Mailgun dashboard, add a webhook pointing at:
  *       https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
  *     subscribed to at least: accepted, delivered, permanent_fail
@@ -107,6 +105,25 @@ define( 'WPEL_VERSION', '2.2.5' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );
+
+/**
+ * Credentials that are the same on every site (Mailgun API key + webhook
+ * signing key, Twilio credentials) live only in wp-config.php and aren't
+ * shown in Settings. Falls back to a value saved in Settings by an older
+ * version of this plugin, so existing sites keep working until the
+ * constant is added.
+ *
+ * @param string $constant   e.g. 'WPEL_MAILGUN_API_KEY'.
+ * @param string $legacy_key Matching key in the WPEL_OPTION array.
+ * @return string
+ */
+function wpel_shared_credential( $constant, $legacy_key ) {
+	if ( defined( $constant ) && constant( $constant ) ) {
+		return trim( (string) constant( $constant ) );
+	}
+	$o = get_option( WPEL_OPTION, array() );
+	return isset( $o[ $legacy_key ] ) ? trim( (string) $o[ $legacy_key ] ) : '';
+}
 
 // GitHub repo the update checker reads releases/tags from.
 define( 'WPEL_GITHUB_REPO', 'https://github.com/TrueMarket/mailgun-watch/' );

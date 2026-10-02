@@ -47,7 +47,6 @@ class WPEL_Admin {
 		$out = array();
 		// Mailgun API sending.
 		$out['sending_enabled']  = ! empty( $input['sending_enabled'] ) ? 1 : 0;
-		$out['api_key']          = sanitize_text_field( isset( $input['api_key'] ) ? $input['api_key'] : '' );
 		$out['domain']           = sanitize_text_field( isset( $input['domain'] ) ? $input['domain'] : '' );
 		$out['from_name']        = sanitize_text_field( isset( $input['from_name'] ) ? $input['from_name'] : '' );
 		$out['from_email']       = sanitize_email( isset( $input['from_email'] ) ? $input['from_email'] : '' );
@@ -57,15 +56,15 @@ class WPEL_Admin {
 		$out['alert_email']      = $this->sanitize_email_list( isset( $input['alert_email'] ) ? $input['alert_email'] : '' );
 		// Saved but currently unused — Slack alerting is disabled and the field is hidden, see class-wpel-monitor.php.
 		$out['slack_webhook']    = esc_url_raw( isset( $input['slack_webhook'] ) ? $input['slack_webhook'] : '', array( 'https' ) );
-		// Twilio credentials: left blank here, the matching wp-config.php constant
-		// still applies (see get_twilio_credentials() in class-wpel-monitor.php) —
-		// same override precedence as the Mailgun signing key below.
-		$out['twilio_account_sid'] = sanitize_text_field( isset( $input['twilio_account_sid'] ) ? $input['twilio_account_sid'] : '' );
-		$out['twilio_sid']         = sanitize_text_field( isset( $input['twilio_sid'] ) ? $input['twilio_sid'] : '' );
-		$out['twilio_auth_token']  = sanitize_text_field( isset( $input['twilio_auth_token'] ) ? $input['twilio_auth_token'] : '' );
-		$out['twilio_from_number'] = sanitize_text_field( isset( $input['twilio_from_number'] ) ? $input['twilio_from_number'] : '' );
 		$out['twilio_to_numbers']  = $this->sanitize_phone_list( isset( $input['twilio_to_numbers'] ) ? $input['twilio_to_numbers'] : '' );
-		$out['signing_key']      = sanitize_text_field( isset( $input['signing_key'] ) ? $input['signing_key'] : '' );
+		// Shared credentials now come from wp-config.php and have no field here.
+		// Carry over any value an older version saved, so wpel_shared_credential()
+		// can still fall back to it on sites that haven't added the constant yet.
+		foreach ( array( 'api_key', 'signing_key', 'twilio_account_sid', 'twilio_sid', 'twilio_auth_token', 'twilio_from_number' ) as $legacy_key ) {
+			if ( ! empty( $previous[ $legacy_key ] ) ) {
+				$out[ $legacy_key ] = $previous[ $legacy_key ];
+			}
+		}
 		$out['store_body']       = 0;
 		$out['alert_temp_fail']  = 0;
 		$out['retention_days']   = max( 0, (int) ( isset( $input['retention_days'] ) ? $input['retention_days'] : 30 ) );
@@ -75,10 +74,9 @@ class WPEL_Admin {
 		$out['unopened_hours']   = max( 1, (int) ( isset( $input['unopened_hours'] ) ? $input['unopened_hours'] : 24 ) );
 
 		// A previously-passing webhook check or test send no longer proves
-		// anything once the API key or domain they were run against changes.
-		$prev_api_key = isset( $previous['api_key'] ) ? $previous['api_key'] : '';
-		$prev_domain  = isset( $previous['domain'] ) ? $previous['domain'] : '';
-		if ( $prev_api_key !== $out['api_key'] || $prev_domain !== $out['domain'] ) {
+		// anything once the domain they were run against changes.
+		$prev_domain = isset( $previous['domain'] ) ? $previous['domain'] : '';
+		if ( $prev_domain !== $out['domain'] ) {
 			$this->update_setup_status(
 				array(
 					'webhook_verified' => false,
@@ -213,7 +211,8 @@ class WPEL_Admin {
 	/**
 	 * Sends a real test email through the full pipeline (wp_mail -> WPEL_Mailer
 	 * -> Mailgun API -> logged row) so the settings page can confirm sending
-	 * actually works, not just that the form saved.
+	 * actually works, not just that the form saved. Goes to the saved alert
+	 * email recipient(s), falling back to admin_email like real alerts do.
 	 */
 	public function handle_send_test_email() {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -221,9 +220,8 @@ class WPEL_Admin {
 		}
 		check_admin_referer( 'wpel_send_test_email' );
 
-		$user    = wp_get_current_user();
-		$posted  = isset( $_POST['wpel_test_to'] ) ? sanitize_email( wp_unslash( $_POST['wpel_test_to'] ) ) : '';
-		$to      = is_email( $posted ) ? $posted : ( $user->user_email ? $user->user_email : get_option( 'admin_email' ) );
+		$o  = get_option( WPEL_OPTION, array() );
+		$to = ! empty( $o['alert_email'] ) ? $o['alert_email'] : get_option( 'admin_email' );
 
 		$sent = wp_mail(
 			$to,
@@ -380,15 +378,24 @@ class WPEL_Admin {
 	 * itself was rejected.
 	 */
 	private function run_mailgun_config_check( $o ) {
-		$api_key = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
+		$api_key = wpel_shared_credential( 'WPEL_MAILGUN_API_KEY', 'api_key' );
 		$domain  = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
 
-		if ( ! $api_key || ! $domain ) {
+		if ( ! $api_key ) {
 			return array(
 				array(
 					'label'  => 'API key & domain',
 					'ok'     => false,
-					'detail' => 'Enter both a Mailgun API key and sending domain on the Mailgun Sending tab first.',
+					'detail' => 'Define WPEL_MAILGUN_API_KEY in wp-config.php first.',
+				),
+			);
+		}
+		if ( ! $domain ) {
+			return array(
+				array(
+					'label'  => 'API key & domain',
+					'ok'     => false,
+					'detail' => 'Enter a sending domain on the Mailgun Sending tab first.',
 				),
 			);
 		}
@@ -593,7 +600,6 @@ class WPEL_Admin {
 
 			<h2 class="nav-tab-wrapper" id="wpel-tabs">
 				<a href="#" class="nav-tab nav-tab-active" data-tab="wpel-tab-mailgun">Mailgun Sending</a>
-				<a href="#" class="nav-tab" data-tab="wpel-tab-twilio">Twilio / SMS</a>
 				<a href="#" class="nav-tab" data-tab="wpel-tab-alerting">Alerting &amp; Logging</a>
 			</h2>
 
@@ -604,13 +610,8 @@ class WPEL_Admin {
 					<table class="form-table" role="presentation">
 						<tr>
 							<th scope="row">Send via Mailgun API</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sending_enabled]" value="1" <?php checked( $sending_enabled ); ?>> Enabled — this plugin is the mail transport (no SMTP plugin needed)</label>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sending_enabled]" value="1" <?php checked( $sending_enabled ); ?>> Enabled - this plugin is the mail transport (no SMTP plugin needed)</label>
 							<p class="description">When off, WordPress falls back to its default transport (usually PHP <code>mail()</code>), which most hosts don't deliver reliably.</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_api_key">Mailgun API key</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[api_key]" id="wpel_api_key" type="password" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['api_key'] ) ? $o['api_key'] : '' ); ?>">
-							<p class="description">Get it <a href="https://app.mailgun.com/settings/api_security" target="_blank">here</a></p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_domain">Mailgun sending domain</label></th>
@@ -631,78 +632,6 @@ class WPEL_Admin {
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from]" value="1" <?php checked( ! empty( $o['force_from'] ) ); ?>> Always use the default from name/email above, even if a plugin/theme sets its own</label>
 							<p class="description">Recommended: many plugins set an unverified From address (e.g. WordPress's own default, <code>wordpress@<?php echo esc_html( wp_parse_url( home_url(), PHP_URL_HOST ) ); ?></code>), which Mailgun will reject unless that exact domain is verified.</p></td>
 						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_key">Mailgun webhook signing key</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[signing_key]" id="wpel_key" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['signing_key'] ) ? $o['signing_key'] : '' ); ?>" placeholder="<?php echo defined( 'WPEL_MAILGUN_SIGNING_KEY' ) ? 'Using default from wp-config.php' : ''; ?>">
-							<p class="description">Click <a href="https://app.mailgun.com/mg/sending/mg.abpdaily.com/webhooks/account-level?tab=account-level" target="_blank">here</a> to create one. Required; unsigned webhook calls are rejected.
-							<?php if ( defined( 'WPEL_MAILGUN_SIGNING_KEY' ) ) : ?>
-								A <code>WPEL_MAILGUN_SIGNING_KEY</code> constant is defined in <code>wp-config.php</code> and will be used automatically if this field is left blank.
-							<?php endif; ?>
-							</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_test_to">Send test email</label></th>
-							<td>
-								<?php // These fields submit to the standalone form below via the form="" attribute — a real <form> can't nest inside this page's main settings form. ?>
-								<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
-								<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
-								<input type="email" name="wpel_test_to" id="wpel_test_to" class="regular-text" placeholder="you@example.com" value="<?php echo esc_attr( wp_get_current_user()->user_email ); ?>" form="wpel-test-email-form" required>
-								<button type="submit" class="button" form="wpel-test-email-form">Send test email</button>
-								<p class="description">Sends a real email through this settings page's current saved configuration and logs it like any other send.</p>
-							</td>
-						</tr>
-					</table>
-				</div>
-
-				<div id="wpel-tab-twilio" class="wpel-tab-panel" style="display:none">
-					<table class="form-table" role="presentation">
-						<tr>
-							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_account_sid]" id="wpel_twilio_account_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_account_sid'] ) ? $o['twilio_account_sid'] : '' ); ?>" placeholder="<?php echo defined( 'WPEL_TWILIO_ACCOUNT_SID' ) ? 'Using default from wp-config.php' : 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; ?>">
-							<p class="description">The real Account SID from the <a href="https://console.twilio.com/" target="_blank">Twilio Console</a> dashboard (starts with <code>AC</code>) — always used in the API URL, regardless of which credential pair authenticates below.
-							<?php if ( defined( 'WPEL_TWILIO_ACCOUNT_SID' ) ) : ?>
-								A <code>WPEL_TWILIO_ACCOUNT_SID</code> constant is defined in <code>wp-config.php</code> and will be used automatically if this field is left blank.
-							<?php endif; ?>
-							</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_twilio_sid">Twilio SID</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_sid]" id="wpel_twilio_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_sid'] ) ? $o['twilio_sid'] : '' ); ?>" placeholder="<?php echo defined( 'WPEL_TWILIO_SID' ) ? 'Using default from wp-config.php' : 'ACxxxx... or SKxxxx...'; ?>">
-							<p class="description">Basic Auth username: either the Account SID above + the Auth Token below (the master credentials), or an API Key SID (starts with <code>SK</code>, recommended since it's independently revocable) + its Secret from <em>Console &rarr; Account &rarr; API keys &amp; tokens</em>.
-							<?php if ( defined( 'WPEL_TWILIO_SID' ) ) : ?>
-								A <code>WPEL_TWILIO_SID</code> constant is defined in <code>wp-config.php</code> and will be used automatically if this field is left blank.
-							<?php endif; ?>
-							</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_twilio_auth_token">Twilio Auth Token</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_auth_token]" id="wpel_twilio_auth_token" type="password" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_auth_token'] ) ? $o['twilio_auth_token'] : '' ); ?>" placeholder="<?php echo defined( 'WPEL_TWILIO_AUTH_TOKEN' ) ? 'Using default from wp-config.php' : ''; ?>">
-							<p class="description">Pairs with whichever Twilio SID you used above — the master Auth Token, or the API Key's Secret.
-							<?php if ( defined( 'WPEL_TWILIO_AUTH_TOKEN' ) ) : ?>
-								A <code>WPEL_TWILIO_AUTH_TOKEN</code> constant is defined in <code>wp-config.php</code> and will be used automatically if this field is left blank.
-							<?php endif; ?>
-							</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_twilio_from_number">Twilio from number</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_from_number]" id="wpel_twilio_from_number" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_from_number'] ) ? $o['twilio_from_number'] : '' ); ?>" placeholder="<?php echo defined( 'WPEL_TWILIO_FROM_NUMBER' ) ? 'Using default from wp-config.php' : '+15551234567'; ?>">
-							<p class="description">The Twilio sending number, in E.164 format (leading <code>+</code>, then country code).
-							<?php if ( defined( 'WPEL_TWILIO_FROM_NUMBER' ) ) : ?>
-								A <code>WPEL_TWILIO_FROM_NUMBER</code> constant is defined in <code>wp-config.php</code> and will be used automatically if this field is left blank.
-							<?php endif; ?>
-							</p></td>
-						</tr>
-						<tr>
-							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
-							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
-							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_sms' ) ); ?>" form="wpel-test-sms-form">
-							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
-							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
-							<p class="description">
-								Failure, outage, and unopened-email alerts are texted to every number here (comma-separated) — this is per-site, unlike the Twilio credentials above which are commonly shared account-wide via wp-config.php. "Send test SMS" texts all of them now, using the saved numbers and Twilio config — save changes above first if you just edited this field.
-							</p></td>
-						</tr>
 					</table>
 				</div>
 
@@ -711,7 +640,20 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row"><label for="wpel_alert_email">Alert email recipient</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_email]" id="wpel_alert_email" type="email" multiple class="regular-text" value="<?php echo esc_attr( isset( $o['alert_email'] ) ? $o['alert_email'] : '' ); ?>">
-							<p class="description">Separate multiple addresses with a comma.</p></td>
+							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
+							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
+							<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
+							<button type="submit" class="button" form="wpel-test-email-form" style="margin-left:8px;">Send test email</button>
+							<p class="description">Separate multiple addresses with a comma. Save changes before sending a test email — it goes through the full Mailgun pipeline and is logged like any other send.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
+							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
+							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_sms' ) ); ?>" form="wpel-test-sms-form">
+							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
+							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
+							<p class="description">Separate multiple numbers with a comma. Save changes before sending a test SMS.</p></td>
 						</tr>
 						<?php /* Slack hidden for now — functionality still exists (see notify_slack() in class-wpel-monitor.php), just not rendered here.
 						<tr>
@@ -891,31 +833,43 @@ class WPEL_Admin {
 	}
 
 	/**
-	 * Sidebar checklist for the Settings page: the steps to redo every time
-	 * this plugin lands on a new site, with live checkmarks for whatever can
-	 * be verified from saved settings/wp-config constants, plus two steps
-	 * (webhook registration, a successful test send) confirmed via
-	 * get_setup_status() since they can only be proven by actually doing
-	 * them — see the domain-sharing note in README.md and the "Sharing
-	 * defaults across sites" section for the reasoning behind the domain step.
+	 * Sidebar checklist for the Settings page: only the steps to redo every
+	 * time this plugin lands on a new site, with live checkmarks for whatever
+	 * can be verified from saved settings, plus two steps (webhook
+	 * registration, a successful test send) confirmed via get_setup_status()
+	 * since they can only be proven by actually doing them. Shared
+	 * wp-config.php credentials only show up here when one is missing.
 	 */
 	private function render_setup_checklist( $o ) {
 		$status          = $this->get_setup_status();
-		$has_api_key     = ! empty( $o['api_key'] );
 		$has_domain      = ! empty( $o['domain'] );
 		$has_from_email  = ! empty( $o['from_email'] );
-		$has_signing_key = ! empty( $o['signing_key'] ) || defined( 'WPEL_MAILGUN_SIGNING_KEY' );
 		$has_webhook     = ! empty( $status['webhook_verified'] );
 		$has_alerts      = ! empty( $o['alert_email'] ) || ! empty( $o['twilio_to_numbers'] );
 		$has_test_email  = ! empty( $status['test_email_sent'] );
-		// Each Twilio credential can come from the Twilio / SMS tab or its
-		// matching wp-config.php constant — see get_twilio_credentials() in
-		// class-wpel-monitor.php for the same override precedence applied there.
-		$twilio_ready    = ( ! empty( $o['twilio_account_sid'] ) || defined( 'WPEL_TWILIO_ACCOUNT_SID' ) )
-			&& ( ! empty( $o['twilio_sid'] ) || defined( 'WPEL_TWILIO_SID' ) )
-			&& ( ! empty( $o['twilio_auth_token'] ) || defined( 'WPEL_TWILIO_AUTH_TOKEN' ) )
-			&& ( ! empty( $o['twilio_from_number'] ) || defined( 'WPEL_TWILIO_FROM_NUMBER' ) );
-		$all_done        = $has_domain && $has_api_key && $has_from_email && $has_signing_key
+
+		// Shared credentials (see wpel_shared_credential()) — Twilio's only
+		// matter once this site actually has phone numbers to text.
+		$required = array(
+			'WPEL_MAILGUN_API_KEY'     => array( 'api_key', 'Mailgun private API key' ),
+			'WPEL_MAILGUN_SIGNING_KEY' => array( 'signing_key', 'Mailgun HTTP webhook signing key' ),
+		);
+		if ( ! empty( $o['twilio_to_numbers'] ) ) {
+			$required += array(
+				'WPEL_TWILIO_ACCOUNT_SID' => array( 'twilio_account_sid', 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' ),
+				'WPEL_TWILIO_SID'         => array( 'twilio_sid', 'ACxxxx... or SKxxxx...' ),
+				'WPEL_TWILIO_AUTH_TOKEN'  => array( 'twilio_auth_token', 'Twilio auth token or API Key secret' ),
+				'WPEL_TWILIO_FROM_NUMBER' => array( 'twilio_from_number', '+15551234567' ),
+			);
+		}
+		$missing = array();
+		foreach ( $required as $constant => $info ) {
+			if ( ! wpel_shared_credential( $constant, $info[0] ) ) {
+				$missing[ $constant ] = $info[1];
+			}
+		}
+
+		$all_done        = ! $missing && $has_domain && $has_from_email
 			&& $has_webhook && $has_alerts && $has_test_email;
 		$done            = '&#9989;';
 		$todo            = '&#11036;';
@@ -924,28 +878,30 @@ class WPEL_Admin {
 			<div class="postbox">
 				<h2 class="hndle" style="padding:10px 12px;margin:0;font-size:14px;">New site setup checklist</h2>
 				<div style="padding:4px 12px 12px;">
-					<p class="description">Run through this every time the plugin is installed on a new site.</p>
+					<?php if ( $missing ) : ?>
+						<div style="border-left:3px solid #d63638;background:#fcf0f1;padding:8px;margin:8px 0 12px;">
+							<strong>Missing from wp-config.php</strong>
+							<p class="description" style="margin:4px 0;">These are shared by every site, so they aren't in Settings. Add them to <code>wp-config.php</code>:</p>
+							<code style="display:block;white-space:pre-wrap;word-break:break-all;font-size:11px;"><?php
+							foreach ( $missing as $constant => $hint ) {
+								echo esc_html( "define( '{$constant}', '{$hint}' );" ) . "\n";
+							}
+							?></code>
+						</div>
+					<?php endif; ?>
 					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin:0 0 12px;">
 						<?php wp_nonce_field( 'wpel_check_mailgun_config' ); ?>
 						<input type="hidden" name="action" value="wpel_check_mailgun_config">
 						<button type="submit" class="button button-secondary"><?php esc_html_e( 'Check Mailgun config', 'wpel' ); ?></button>
-						<p class="description" style="margin-top:4px;">Asks Mailgun directly whether the API key/domain are valid and the webhook below is actually subscribed — covers steps 1, 2 and 5.</p>
+						<p class="description" style="margin-top:4px;">Checks with Mailgun that the domain is valid and the webhook is set up (steps 1 and 3).</p>
 					</form>
 					<ol style="padding-left:18px;">
 						<li><?php echo $has_domain ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Create a <strong>dedicated</strong> Mailgun sending domain for this site — never reuse a domain already wired to another site's webhook (see warning below).
+							Create a <strong>dedicated</strong> Mailgun sending domain for this site and enter it on the <strong>Mailgun Sending</strong> tab. Never reuse another site's domain (see below).
 							<br><a href="https://app.mailgun.com/mg/sending/new-domain" target="_blank">Add domain &rarr;</a>
 						</li>
-						<li><?php echo ( $has_api_key && $has_domain ) ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Paste the Mailgun API key and that domain into the <strong>Mailgun Sending</strong> tab.
-							<br><a href="https://app.mailgun.com/settings/api_security" target="_blank">Get API key &rarr;</a>
-						</li>
 						<li><?php echo $has_from_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set a default From name/email on a domain verified in Mailgun, and turn on <strong>Force from address</strong>.
-						</li>
-						<li><?php echo $has_signing_key ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set the Mailgun webhook signing key. Unlike the domain, this one is safe to share account-wide via <code>WPEL_MAILGUN_SIGNING_KEY</code> in <code>wp-config.php</code>.
-							<br><a href="https://app.mailgun.com/mg/sending/mg.abpdaily.com/webhooks/account-level?tab=account-level" target="_blank">Get signing key &rarr;</a>
+							Set a default From name/email on that domain, and turn on <strong>Force from address</strong>.
 						</li>
 						<li><?php echo $has_webhook ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							In Mailgun, open this domain &rarr; <strong>Webhooks</strong> &rarr; add an HTTP webhook subscribed to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
@@ -954,12 +910,9 @@ class WPEL_Admin {
 							<br><em>Confirmed automatically by <strong>Check Mailgun config</strong> above once it's set up correctly.</em>
 						</li>
 						<li><?php echo $has_alerts ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set an alert email on the <strong>Alerting &amp; Logging</strong> tab and/or alert phone number(s) on the <strong>Twilio / SMS</strong> tab.
-							<?php if ( ! empty( $o['twilio_to_numbers'] ) && ! $twilio_ready ) : ?>
-								<br><strong style="color:#b32d2e;">Phone numbers are set but Twilio isn't configured</strong> — fill in the Account SID, SID, Auth Token and From number on the <strong>Twilio / SMS</strong> tab (or define <code>WPEL_TWILIO_ACCOUNT_SID</code>, <code>WPEL_TWILIO_SID</code>, <code>WPEL_TWILIO_AUTH_TOKEN</code> and <code>WPEL_TWILIO_FROM_NUMBER</code> in <code>wp-config.php</code>, shared account-wide like the signing key) or texts won't send.
-							<?php endif; ?>
+							Set an alert email and/or alert phone number(s) on the <strong>Alerting &amp; Logging</strong> tab.
 						</li>
-						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the Mailgun Sending tab to confirm the whole pipeline end to end.</li>
+						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the Alerting &amp; Logging tab to confirm the whole pipeline end to end.</li>
 					</ol>
 					<p class="description" style="border-left:3px solid #d63638;padding-left:8px;">
 						<strong>Why the dedicated domain matters:</strong> Mailgun webhooks are registered per sending domain, not per site. If two WordPress installs share one domain, only whichever site's URL is registered in Mailgun gets real delivery data back — the other site's sends still go out fine, they just silently stop reconciling to delivered/failed and lose open tracking.

@@ -373,10 +373,7 @@ class WPEL_Mailgun_Monitor {
 	 * Also rejects stale timestamps to blunt replay attacks.
 	 */
 	private function verify_signature( $sig ) {
-		$key = $this->opt( 'signing_key', '' );
-		if ( ! $key && defined( 'WPEL_MAILGUN_SIGNING_KEY' ) ) {
-			$key = WPEL_MAILGUN_SIGNING_KEY;
-		}
+		$key = wpel_shared_credential( 'WPEL_MAILGUN_SIGNING_KEY', 'signing_key' );
 		if ( ! $key ) {
 			// No key configured => refuse rather than trust unsigned input.
 			return false;
@@ -524,13 +521,9 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * Resolves the four Twilio credentials, letting a Settings-page value
-	 * (Twilio / SMS tab) override the matching wp-config.php constant when
-	 * set, same precedence as the Mailgun signing key above. Leaving Settings
-	 * blank keeps working via the constants alone, so an account-wide
-	 * wp-config.php definition (shared across every site on one Twilio
-	 * account) still works without any per-site Settings entry — see
-	 * "Sharing defaults across sites" in README.md.
+	 * Resolves the four Twilio credentials from their wp-config.php
+	 * constants (see wpel_shared_credential()) — shared across every site
+	 * on one Twilio account, so they aren't shown in Settings.
 	 *
 	 *   account_sid  the real Account SID (starts with AC) — always goes in
 	 *                the URL path, regardless of which credential pair
@@ -545,23 +538,12 @@ class WPEL_Mailgun_Monitor {
 	 * @return array{account_sid: string, sid: string, auth_token: string, from_number: string}
 	 */
 	private function get_twilio_credentials() {
-		$account_sid = trim( $this->opt( 'twilio_account_sid', '' ) );
-		if ( ! $account_sid && defined( 'WPEL_TWILIO_ACCOUNT_SID' ) ) {
-			$account_sid = WPEL_TWILIO_ACCOUNT_SID;
-		}
-		$sid = trim( $this->opt( 'twilio_sid', '' ) );
-		if ( ! $sid && defined( 'WPEL_TWILIO_SID' ) ) {
-			$sid = WPEL_TWILIO_SID;
-		}
-		$auth_token = trim( $this->opt( 'twilio_auth_token', '' ) );
-		if ( ! $auth_token && defined( 'WPEL_TWILIO_AUTH_TOKEN' ) ) {
-			$auth_token = WPEL_TWILIO_AUTH_TOKEN;
-		}
-		$from_number = trim( $this->opt( 'twilio_from_number', '' ) );
-		if ( ! $from_number && defined( 'WPEL_TWILIO_FROM_NUMBER' ) ) {
-			$from_number = WPEL_TWILIO_FROM_NUMBER;
-		}
-		return compact( 'account_sid', 'sid', 'auth_token', 'from_number' );
+		return array(
+			'account_sid' => wpel_shared_credential( 'WPEL_TWILIO_ACCOUNT_SID', 'twilio_account_sid' ),
+			'sid'         => wpel_shared_credential( 'WPEL_TWILIO_SID', 'twilio_sid' ),
+			'auth_token'  => wpel_shared_credential( 'WPEL_TWILIO_AUTH_TOKEN', 'twilio_auth_token' ),
+			'from_number' => wpel_shared_credential( 'WPEL_TWILIO_FROM_NUMBER', 'twilio_from_number' ),
+		);
 	}
 
 	/**
@@ -623,7 +605,7 @@ class WPEL_Mailgun_Monitor {
 				array(
 					'to'     => '',
 					'ok'     => false,
-					'detail' => 'Twilio isn\'t configured — set the Account SID, SID, Auth Token and From number on the Twilio / SMS tab, or define WPEL_TWILIO_ACCOUNT_SID, WPEL_TWILIO_SID, WPEL_TWILIO_AUTH_TOKEN and WPEL_TWILIO_FROM_NUMBER in wp-config.php.',
+					'detail' => 'Twilio isn\'t configured — define WPEL_TWILIO_ACCOUNT_SID, WPEL_TWILIO_SID, WPEL_TWILIO_AUTH_TOKEN and WPEL_TWILIO_FROM_NUMBER in wp-config.php.',
 				),
 			);
 		}
@@ -634,7 +616,7 @@ class WPEL_Mailgun_Monitor {
 				array(
 					'to'     => '',
 					'ok'     => false,
-					'detail' => 'No alert phone numbers are saved yet — add one above, save, then try again.',
+					'detail' => 'No alert phone numbers are saved yet — add one on the Alerting & Logging tab, save, then try again.',
 				),
 			);
 		}

@@ -9,22 +9,18 @@ Sends every outgoing WordPress email directly through the **Mailgun HTTP API** �
 1. Copy the `mailgun-email-monitor` folder into `wp-content/plugins/`.
 2. Activate **Mailgun Watch** in **Plugins**. Activation creates the log table and a daily prune cron.
 3. Deactivate WP Mail SMTP (or any other SMTP plugin) — this plugin replaces it as the mail transport. Leaving one active alongside this plugin is harmless (this plugin's `pre_wp_mail` hook wins), but there's no reason to keep it.
-4. Go to **Mailgun Watch → Settings** (three tabs: **Mailgun Sending**, **Twilio / SMS**, and **Alerting & Logging**) and fill in:
-   - **Mailgun API key** — Mailgun dashboard → *Settings → API Keys → Private API key*
-   - **Mailgun sending domain** (US region only)
+4. Add the shared credentials to `wp-config.php` — see [Shared credentials (wp-config.php)](#shared-credentials-wp-configphp). They're the same on every site, so they aren't in Settings.
+5. Go to **Mailgun Watch → Settings** (two tabs: **Mailgun Sending** and **Alerting & Logging**) and fill in:
+   - **Mailgun sending domain** (US region only) — a dedicated one for this site
    - **Default from name/email** — must be on a domain verified in Mailgun, or sends are rejected
-   - **Mailgun webhook signing key** — Mailgun dashboard → *Settings → Webhooks → HTTP webhook signing key*
-   - **Twilio Account SID / SID / Auth Token / From number** — Twilio Console, see [Sharing defaults across sites](#sharing-defaults-across-sites) for what each one means
-   - **Alert phone numbers** — comma-separated E.164 numbers (e.g. `+15551234567`) that should receive SMS alerts. Recipients don't need an app, an account, or to subscribe to anything.
    - **Alert email recipient**
-
-   Each of the four Twilio fields and the Mailgun signing key can instead be left blank and set as a wp-config.php constant, which is handy for sharing one Twilio account or signing key across several sites — see [Sharing defaults across sites](#sharing-defaults-across-sites).
-5. In the **Mailgun dashboard**, add a webhook pointing at the endpoint shown on the Settings page:
+   - **Alert phone numbers** — comma-separated numbers that should receive SMS alerts. Recipients don't need an app, an account, or to subscribe to anything.
+6. In the **Mailgun dashboard**, open this site's domain → *Webhooks* (not the account-level webhooks) and add a webhook pointing at the endpoint shown on the Settings page:
    ```
    https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
    ```
    Subscribe it to at least: `accepted`, `delivered`, `permanent_fail` (add `temporary_fail` if you want soft-failure alerts too).
-6. Click **Send test email** on the Settings page to confirm the whole pipeline — API send, logging, and webhook reconciliation — works end to end.
+7. Click **Send test email** on the Settings page to confirm the whole pipeline — API send, logging, and webhook reconciliation — works end to end.
 
 ## What gets logged
 
@@ -54,15 +50,16 @@ This plugin **is** the Mailgun transport — it doesn't sit alongside another SM
 
 Thresholds, retention, and whether to store message bodies are all on the Settings page.
 
-## Sharing defaults across sites
+## Shared credentials (wp-config.php)
 
-The Mailgun signing key, Slack's webhook, and all four Twilio credentials are optional `wp-config.php` constants that a blank Settings field falls back to — handy for sharing one Twilio account (or one Mailgun signing key) across several sites without re-entering it in Settings on each one:
+Credentials that are the same on every site live only in `wp-config.php` and aren't shown in Settings. Copy the same block into each site's `wp-config.php`:
 
 ```php
+define( 'WPEL_MAILGUN_API_KEY', 'Mailgun private API key' );               // Mailgun → Settings → API Keys. Use the account key, not a domain sending key.
 define( 'WPEL_MAILGUN_SIGNING_KEY', 'account-level HTTP webhook signing key' );
 define( 'WPEL_SLACK_WEBHOOK', 'https://hooks.slack.com/services/...' ); // unused while Slack alerting is disabled
 
-// SMS alerts — Settings page (Twilio / SMS tab) overrides any of these per-site:
+// SMS alerts:
 define( 'WPEL_TWILIO_ACCOUNT_SID', 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' ); // real Account SID — always goes in the API URL
 define( 'WPEL_TWILIO_SID', 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' );        // Basic Auth user: the Account SID above, OR an API Key SID (starts with SK)
 define( 'WPEL_TWILIO_AUTH_TOKEN', 'your Twilio auth token or API Key secret' ); // pairs with whichever WPEL_TWILIO_SID you used
@@ -71,9 +68,11 @@ define( 'WPEL_TWILIO_FROM_NUMBER', '+15551234567' );                      // E.1
 
 `WPEL_TWILIO_ACCOUNT_SID` must always be the real Account SID from the Twilio Console dashboard (starts with `AC`) — the API path requires it regardless of which credential pair you authenticate with. `WPEL_TWILIO_SID` + `WPEL_TWILIO_AUTH_TOKEN` is whatever you use for Basic Auth: either that same Account SID plus the master Auth Token, or (recommended, since it's independently revocable) an API Key SID (`SK...`) plus its Secret from *Console → Account → API keys & tokens*.
 
-Each of the four Twilio fields is resolved independently (see `get_twilio_credentials()` in `includes/class-wpel-monitor.php`), so a site can override just one of them in Settings — e.g. keep the Account SID/SID/Auth Token shared via `wp-config.php` but set its own From number — and leave the rest on the shared constants.
+The Twilio constants are only needed on sites that have alert phone numbers set. The setup checklist on the Settings page lists any constant that's missing.
 
-There's no such shortcut for the Mailgun API key/domain, From address, or the Twilio "alert phone numbers" list — those are inherently per-site (each site sends as itself on its own verified domain, and each site's owner wants their own phone texted).
+Sites set up with an older version of this plugin may still have these values saved in Settings. Those saved values are used as a fallback until the constant is defined; the constant always wins once it's there.
+
+The sending domain, From address, and alert email/phone numbers stay in Settings because they're different on each site (each site sends from its own dedicated domain — see the checklist note on why domains can't be shared).
 
 ## Notes / limitations
 
@@ -102,9 +101,9 @@ To ship an update, paste this to Claude Code (fill in the changelog notes), or f
 Release a new version of this plugin. Bump the Version header and
 WPEL_VERSION in mailgun-email-monitor.php together (patch bump unless
 I say otherwise). Add a new entry at the top of the == Changelog ==
-section in readme.txt for that version with these notes:
+section in readme.txt containing a concise list of all changes
 
-- Add check mailgun config button
+Show me the list of changes before commiting
 
 Commit everything, tag the commit vX.Y.Z to match, and push both main
 and the tag to origin.
