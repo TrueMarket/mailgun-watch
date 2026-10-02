@@ -510,7 +510,7 @@ class WPEL_Admin {
 			$checks[] = array(
 				'label'  => 'Webhook registration',
 				'ok'     => false,
-				'detail' => 'This site\'s webhook URL isn\'t subscribed to: ' . implode( ', ', $missing ) . '. In Mailgun, open this domain → Webhooks and point (or add) those events at: ' . $our_url,
+				'detail' => 'This site\'s webhook URL isn\'t subscribed to: ' . implode( ', ', $missing ) . '. In Mailgun, go to Send → Webhooks → Add webhook → Domain-level, pick this domain, and point (or add) those events at:' . $our_url,
 			);
 		} else {
 			$checks[] = array(
@@ -678,8 +678,14 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">Webhook endpoint</th>
 							<td><code id="wpel_webhook_url"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
-							<button type="button" class="button-link" id="wpel_copy_webhook" style="margin-left:8px;">Copy</button>
+							<button type="button" class="button-link" data-wpel-copy="wpel_webhook_url" style="margin-left:8px;">Copy</button>
 							<p class="description">Add this URL in Mailgun for events: accepted, delivered, permanent_fail (temporary_fail optional; opened required if "Track opens" above is enabled).</p></td>
+						</tr>
+						<tr>
+							<th scope="row">Webhook description</th>
+							<td><code id="wpel_webhook_desc"><?php echo esc_html( $this->webhook_description() ); ?></code>
+							<button type="button" class="button-link" data-wpel-copy="wpel_webhook_desc" style="margin-left:8px;">Copy</button>
+							<p class="description">Paste into the webhook's Description field in Mailgun so you can tell this site's webhook apart from the others.</p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_ret">Log retention (days)</label></th>
@@ -785,23 +791,19 @@ class WPEL_Admin {
 			sync(); // also fill in on load if the domain is already saved but the email isn't
 		} )();
 
+		// Any button with data-wpel-copy="<element id>" copies that element's text.
 		( function () {
-			var btn  = document.getElementById( 'wpel_copy_webhook' );
-			var code = document.getElementById( 'wpel_webhook_url' );
-			if ( ! btn || ! code ) {
-				return;
-			}
-
-			var defaultLabel = btn.textContent;
-
-			function showCopied() {
+			function showCopied( btn ) {
+				if ( ! btn.dataset.wpelLabel ) {
+					btn.dataset.wpelLabel = btn.textContent;
+				}
 				btn.textContent = 'Copied!';
 				setTimeout( function () {
-					btn.textContent = defaultLabel;
+					btn.textContent = btn.dataset.wpelLabel;
 				}, 1500 );
 			}
 
-			function fallbackCopy( text ) {
+			function fallbackCopy( text, btn ) {
 				var temp = document.createElement( 'textarea' );
 				temp.value = text;
 				temp.style.position = 'fixed';
@@ -810,24 +812,47 @@ class WPEL_Admin {
 				temp.select();
 				try {
 					document.execCommand( 'copy' );
-					showCopied();
+					showCopied( btn );
 				} catch ( e ) {}
 				document.body.removeChild( temp );
 			}
 
-			btn.addEventListener( 'click', function () {
-				var text = code.textContent;
+			document.addEventListener( 'click', function ( e ) {
+				var btn = e.target.closest( '[data-wpel-copy]' );
+				if ( ! btn ) {
+					return;
+				}
+				var source = document.getElementById( btn.getAttribute( 'data-wpel-copy' ) );
+				if ( ! source ) {
+					return;
+				}
+				var text = source.textContent;
 				if ( navigator.clipboard && navigator.clipboard.writeText ) {
-					navigator.clipboard.writeText( text ).then( showCopied, function () {
-						fallbackCopy( text );
+					navigator.clipboard.writeText( text ).then( function () {
+						showCopied( btn );
+					}, function () {
+						fallbackCopy( text, btn );
 					} );
 				} else {
-					fallbackCopy( text );
+					fallbackCopy( text, btn );
 				}
 			} );
 		} )();
 		</script>
 		<?php
+	}
+
+	/**
+	 * Suggested Description for this site's Mailgun webhook, so several
+	 * sites' webhooks are easy to tell apart in the Mailgun dashboard.
+	 * Falls back to the host when the site has no name set.
+	 */
+	private function webhook_description() {
+		$name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+		if ( '' === trim( $name ) ) {
+			$name = wp_parse_url( home_url(), PHP_URL_HOST );
+		}
+		return $name . ' - Mailgun Watch';
 	}
 
 	/**
@@ -906,9 +931,13 @@ class WPEL_Admin {
 							Set a default From name/email on that domain, and turn on <strong>Force from address</strong>.
 						</li>
 						<li><?php echo $has_webhook ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							In Mailgun, open this domain &rarr; <strong>Webhooks</strong> &rarr; add an HTTP webhook subscribed to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
-							<br><code style="word-break:break-all;display:inline-block;margin:4px 0;"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
-							<br><a href="https://app.mailgun.com/mg/sending/domains" target="_blank">Open domains &rarr;</a>
+							In Mailgun, go to <strong>Send &rarr; Webhooks</strong> &rarr; <strong>Add webhook</strong> &rarr; <strong>Domain-level</strong> (not Account-level), pick this site's domain, and subscribe it to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
+							<br><code id="wpel_checklist_webhook_url" style="word-break:break-all;display:inline-block;margin:4px 0;"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
+							<button type="button" class="button-link" data-wpel-copy="wpel_checklist_webhook_url">Copy</button>
+							<br>with the description:
+							<br><code id="wpel_checklist_webhook_desc" style="word-break:break-all;display:inline-block;margin:4px 0;"><?php echo esc_html( $this->webhook_description() ); ?></code>
+							<button type="button" class="button-link" data-wpel-copy="wpel_checklist_webhook_desc">Copy</button>
+							<br><a href="https://app.mailgun.com/mg/sending/webhooks" target="_blank">Open webhooks &rarr;</a>
 							<br><em>Confirmed automatically by <strong>Check Mailgun config</strong> above once it's set up correctly.</em>
 						</li>
 						<li><?php echo $has_alerts ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>

@@ -16,7 +16,7 @@ Sends every outgoing WordPress email directly through the **Mailgun HTTP API** �
    - **Default from name/email** — must be on a domain verified in Mailgun, or sends are rejected
    - **Alert email recipient**
    - **Alert phone numbers** — comma-separated numbers that should receive SMS alerts. Recipients don't need an app, an account, or to subscribe to anything.
-6. In the **Mailgun dashboard**, open this site's domain → *Webhooks* (not the account-level webhooks) and add a webhook pointing at the endpoint shown on the Settings page:
+6. In the **Mailgun dashboard**, go to *Send → Webhooks → Add webhook → Domain-level* (not Account-level), pick this site's domain, and point it at the endpoint shown on the Settings page:
    ```
    https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
    ```

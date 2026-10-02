@@ -83,7 +83,8 @@
  *   - Set the default From name/email (must be on a domain verified in Mailgun).
  *   - On the Alerting & Logging tab, set the alert email recipient and/or
  *     the phone number(s) that should receive SMS alerts.
- *   - In the Mailgun dashboard, add a webhook pointing at:
+ *   - In the Mailgun dashboard (Send -> Webhooks -> Add webhook ->
+ *     Domain-level, pick this site's domain), add a webhook pointing at:
  *       https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
  *     subscribed to at least: accepted, delivered, permanent_fail
  *     (temporary_fail optional; opened required if you enable open tracking
