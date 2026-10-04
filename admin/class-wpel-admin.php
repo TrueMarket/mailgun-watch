@@ -19,6 +19,14 @@ class WPEL_Admin {
 	 */
 	const SETUP_STATUS_OPTION = 'wpel_setup_status';
 
+	/**
+	 * Stand-in value printed into a secret field (SMTP password, Twilio auth
+	 * token) once one is saved, so it shows as a filled-in password without
+	 * the real secret ever reaching the page source. Submitting it unchanged
+	 * keeps the saved value — see sanitize_secret().
+	 */
+	const SAVED_SECRET_MASK = '••••••••••••';
+
 	public static function instance() {
 		if ( ! self::$instance ) {
 			self::$instance = new self();
@@ -35,6 +43,7 @@ class WPEL_Admin {
 		add_action( 'admin_notices', array( $this, 'test_sms_notice' ) );
 		add_action( 'admin_post_wpel_check_mailgun_config', array( $this, 'handle_check_mailgun_config' ) );
 		add_action( 'admin_notices', array( $this, 'mailgun_config_check_notice' ) );
+		add_action( 'wp_ajax_wpel_log_entry', array( $this, 'ajax_log_entry' ) );
 	}
 
 	public function register_settings() {
@@ -52,21 +61,33 @@ class WPEL_Admin {
 		$out['from_name']        = sanitize_text_field( isset( $input['from_name'] ) ? $input['from_name'] : '' );
 		$out['from_email']       = sanitize_email( isset( $input['from_email'] ) ? $input['from_email'] : '' );
 		$out['force_from']       = ! empty( $input['force_from'] ) ? 1 : 0;
+		// SMTP fallback.
+		$out['smtp_host']        = sanitize_text_field( ! empty( $input['smtp_host'] ) ? $input['smtp_host'] : 'smtp.mailgun.org' );
+		$smtp_port               = isset( $input['smtp_port'] ) ? (int) $input['smtp_port'] : 587;
+		$out['smtp_port']        = ( $smtp_port >= 1 && $smtp_port <= 65535 ) ? $smtp_port : 587;
+		$out['smtp_encryption']  = ( isset( $input['smtp_encryption'] ) && in_array( $input['smtp_encryption'], array( 'tls', 'ssl', 'none' ), true ) ) ? $input['smtp_encryption'] : 'tls';
+		$out['smtp_username']    = sanitize_text_field( isset( $input['smtp_username'] ) ? $input['smtp_username'] : '' );
+		$out['smtp_password']    = $this->sanitize_secret( $input, $previous, 'smtp_password' );
 		// Logging + alerting.
 		$out['track_opens']      = ! empty( $input['track_opens'] ) ? 1 : 0;
 		$out['alert_email']      = $this->sanitize_email_list( isset( $input['alert_email'] ) ? $input['alert_email'] : '' );
 		// Saved but currently unused — Slack alerting is disabled and the field is hidden, see class-wpel-monitor.php.
 		$out['slack_webhook']    = esc_url_raw( isset( $input['slack_webhook'] ) ? $input['slack_webhook'] : '', array( 'https' ) );
+		// SMS via Twilio. The fields stay saved while the toggle is off, so
+		// switching it back on doesn't mean re-entering them.
+		$out['sms_enabled']        = ! empty( $input['sms_enabled'] ) ? 1 : 0;
+		$out['twilio_account_sid'] = sanitize_text_field( isset( $input['twilio_account_sid'] ) ? $input['twilio_account_sid'] : '' );
+		$out['twilio_sid']         = sanitize_text_field( isset( $input['twilio_sid'] ) ? $input['twilio_sid'] : '' );
+		$out['twilio_auth_token']  = $this->sanitize_secret( $input, $previous, 'twilio_auth_token' );
+		$out['twilio_from_number'] = $this->sanitize_twilio_from_number( isset( $input['twilio_from_number'] ) ? $input['twilio_from_number'] : '' );
 		$out['twilio_to_numbers']  = $this->sanitize_phone_list( isset( $input['twilio_to_numbers'] ) ? $input['twilio_to_numbers'] : '' );
-		// Shared credentials now come from wp-config.php and have no field here.
-		// Carry over any value an older version saved, so wpel_shared_credential()
-		// can still fall back to it on sites that haven't added the constant yet.
-		foreach ( array( 'signing_key','twilio_account_sid', 'twilio_sid', 'twilio_auth_token', 'twilio_from_number' ) as $legacy_key ) {
-			if ( ! empty( $previous[ $legacy_key ] ) ) {
-				$out[ $legacy_key ] = $previous[ $legacy_key ];
-			}
+		// The webhook signing key now comes from wp-config.php and has no field
+		// here. Carry over any value an older version saved, so
+		// wpel_shared_credential() can still fall back to it on sites that
+		// haven't added the constant yet.
+		if ( ! empty( $previous['signing_key'] ) ) {
+			$out['signing_key'] = $previous['signing_key'];
 		}
-		$out['store_body']       = 0;
 		$out['alert_temp_fail']  = 0;
 		$out['retention_days']   = max( 0, (int) ( isset( $input['retention_days'] ) ? $input['retention_days'] : 30 ) );
 		$out['outage_threshold'] = max( 1, (int) ( isset( $input['outage_threshold'] ) ? $input['outage_threshold'] : 5 ) );
@@ -88,6 +109,22 @@ class WPEL_Admin {
 		}
 
 		return $out;
+	}
+
+	/**
+	 * A secret field's saved value is never printed back into the form —
+	 * it shows SAVED_SECRET_MASK instead — so receiving the mask back (or
+	 * no field at all) means "keep the saved value", and an emptied field
+	 * clears it. Not run through sanitize_text_field(), which would mangle
+	 * secrets containing < > or %xx sequences.
+	 */
+	private function sanitize_secret( $input, $previous, $key ) {
+		$saved = isset( $previous[ $key ] ) ? $previous[ $key ] : '';
+		if ( ! isset( $input[ $key ] ) ) {
+			return $saved;
+		}
+		$value = trim( (string) $input[ $key ] );
+		return self::SAVED_SECRET_MASK === $value ? $saved : $value;
 	}
 
 	/**
@@ -183,6 +220,33 @@ class WPEL_Admin {
 	}
 
 	/**
+	 * Same E.164 normalization as sanitize_phone_list(), for the single
+	 * Twilio sending number. An invalid entry is cleared and reported rather
+	 * than saved, since Twilio would reject every send from it.
+	 */
+	private function sanitize_twilio_from_number( $raw ) {
+		$raw = trim( (string) $raw );
+		if ( '' === $raw ) {
+			return '';
+		}
+		$normalized = $this->normalize_phone_to_e164( $raw );
+		if ( preg_match( '/^\+[1-9]\d{6,14}$/', $normalized ) ) {
+			return $normalized;
+		}
+		add_settings_error(
+			WPEL_OPTION,
+			'wpel_invalid_twilio_from',
+			sprintf(
+				/* translators: %s: the rejected phone number */
+				__( 'The Twilio phone number was removed because it doesn\'t look like a valid phone number: %s', 'wpel' ),
+				esc_html( $raw )
+			),
+			'error'
+		);
+		return '';
+	}
+
+	/**
 	 * Best-effort normalization of a user-typed phone number to E.164.
 	 * Can't reliably guess a country code for numbers that don't provide
 	 * one and aren't 10/11-digit US/Canada numbers — those are returned
@@ -212,9 +276,10 @@ class WPEL_Admin {
 
 	/**
 	 * Sends a real test email through the full pipeline (wp_mail -> WPEL_Mailer
-	 * -> Mailgun API -> logged row) so the settings page can confirm sending
-	 * actually works, not just that the form saved. Goes to the saved alert
-	 * email recipient(s), falling back to admin_email like real alerts do.
+	 * -> Mailgun API or SMTP fallback -> logged row) so the settings page can
+	 * confirm sending actually works, not just that the form saved. Goes to the
+	 * saved alert email recipient(s), falling back to admin_email like real
+	 * alerts do.
 	 */
 	public function handle_send_test_email() {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -222,19 +287,21 @@ class WPEL_Admin {
 		}
 		check_admin_referer( 'wpel_send_test_email' );
 
-		$o  = get_option( WPEL_OPTION, array() );
-		$to = ! empty( $o['alert_email'] ) ? $o['alert_email'] : get_option( 'admin_email' );
+		$o   = get_option( WPEL_OPTION, array() );
+		$to  = ! empty( $o['alert_email'] ) ? $o['alert_email'] : get_option( 'admin_email' );
+		$via = WPEL_Mailer::instance()->transport();
 
 		$sent = wp_mail(
 			$to,
 			'[Mailgun Watch] Test email from ' . wp_parse_url( home_url(), PHP_URL_HOST ),
-			"This is a test email sent from the Mailgun Watch settings page at " . current_time( 'mysql' ) . " to confirm Mailgun API sending is working.\n\nCheck the Email Log to see how it was recorded."
+			"This is a test email sent from the Mailgun Watch settings page at " . current_time( 'mysql' ) . " via " . $this->transport_label( $via ) . " to confirm sending is working.\n\nCheck the Email Log to see how it was recorded."
 		);
 
-		if ( $sent ) {
-			// Sticky: once a test send has succeeded, the checklist stays
-			// checked even if a later attempt fails (e.g. someone temporarily
-			// breaks the config testing something else).
+		// Sticky: once a test send has succeeded, the checklist stays checked
+		// even if a later attempt fails (e.g. someone temporarily breaks the
+		// config testing something else). Only an API send proves the full
+		// pipeline the checklist is about — the SMTP fallback has no webhooks.
+		if ( $sent && 'api' === $via ) {
 			$this->update_setup_status( array( 'test_email_sent' => true ) );
 		}
 
@@ -243,6 +310,7 @@ class WPEL_Admin {
 				array(
 					'page'      => 'wpel-settings',
 					'wpel_test' => $sent ? 'ok' : 'fail',
+					'wpel_via'  => $via,
 				),
 				admin_url( 'admin.php' )
 			)
@@ -250,14 +318,33 @@ class WPEL_Admin {
 		exit;
 	}
 
+	/** Human-readable name for a WPEL_Mailer::transport() value. */
+	private function transport_label( $transport ) {
+		switch ( $transport ) {
+			case 'api':
+				return 'the Mailgun API';
+			case 'smtp':
+				return 'the SMTP fallback (' . WPEL_Mailer::instance()->smtp_host() . ')';
+			default:
+				return 'WordPress\'s default transport (usually PHP mail())';
+		}
+	}
+
 	public function test_email_notice() {
 		if ( ! isset( $_GET['wpel_test'], $_GET['page'] ) || 'wpel-settings' !== $_GET['page'] ) {
 			return;
 		}
+		$via = isset( $_GET['wpel_via'] ) ? sanitize_key( wp_unslash( $_GET['wpel_via'] ) ) : 'api';
+
 		if ( 'ok' === $_GET['wpel_test'] ) {
-			echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Test email sent. Check the Email Log to see how it was recorded.', 'wpel' ) . '</p></div>';
+			$message = 'Test email sent via ' . $this->transport_label( $via ) . '. Check the Email Log to see how it was recorded.';
+			if ( 'default' === $via ) {
+				$message .= ' Neither the Mailgun API nor the SMTP fallback is set up, so delivery is up to this server.';
+			}
+			echo '<div class="notice notice-success is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 		} else {
-			echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( 'Test email failed to send. Check the Email Log for the error, and verify your Mailgun API key/domain.', 'wpel' ) . '</p></div>';
+			$check = 'smtp' === $via ? 'verify the SMTP fallback settings on the Sending tab' : 'verify your Mailgun API key/domain';
+			echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( 'Test email failed to send via ' . $this->transport_label( $via ) . '. Check the Email Log for the error, and ' . $check . '.' ) . '</p></div>';
 		}
 	}
 
@@ -388,7 +475,7 @@ class WPEL_Admin {
 				array(
 					'label'  => 'API key & domain',
 					'ok'     => false,
-					'detail' => 'Enter both a Mailgun API key and sending domain on the Mailgun Sending tab first.',
+					'detail' => 'Enter both a Mailgun API key and sending domain on the Sending tab first.',
 				),
 			);
 		}
@@ -582,6 +669,9 @@ class WPEL_Admin {
 		// Missing key (an install that activated before this option existed)
 		// defaults to enabled — matches WPEL_Mailer's own default resolution.
 		$sending_enabled = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
+		$transport       = WPEL_Mailer::instance()->transport();
+		$smtp_encryption = isset( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
+		$sms_enabled     = WPEL_Mailgun_Monitor::instance()->sms_enabled();
 		?>
 		<div class="wrap">
 			<h1>Settings</h1>
@@ -592,7 +682,7 @@ class WPEL_Admin {
 			<div class="wpel-settings-main">
 
 			<h2 class="nav-tab-wrapper" id="wpel-tabs">
-				<a href="#" class="nav-tab nav-tab-active" data-tab="wpel-tab-mailgun">Mailgun Sending</a>
+				<a href="#" class="nav-tab nav-tab-active" data-tab="wpel-tab-mailgun">Sending</a>
 				<a href="#" class="nav-tab" data-tab="wpel-tab-alerting">Alerting &amp; Logging</a>
 			</h2>
 
@@ -600,35 +690,73 @@ class WPEL_Admin {
 				<?php settings_fields( 'wpel_settings_group' ); ?>
 
 				<div id="wpel-tab-mailgun" class="wpel-tab-panel">
+					<p style="margin-top:16px;">
+						<strong>Currently sending via:</strong> <?php echo esc_html( $this->transport_label( $transport ) ); ?>.
+					</p>
+
+					<h2 class="title">Mailgun API</h2>
 					<table class="form-table" role="presentation">
 						<tr>
 							<th scope="row">Send via Mailgun API</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sending_enabled]" value="1" <?php checked( $sending_enabled ); ?>> Enabled - this plugin is the mail transport (no SMTP plugin needed)</label>
-							<p class="description">When off, WordPress falls back to its default transport (usually PHP <code>mail()</code>), which most hosts don't deliver reliably.</p></td>
+							<p class="description">When off, mail is sent through the SMTP fallback below.</p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_api_key">Mailgun API key</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[api_key]" id="wpel_api_key" type="password" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['api_key'] ) ? $o['api_key'] : '' ); ?>">
-							<p class="description">Your Mailgun API key. Create one <a href="https://app.mailgun.com/settings/api_security" target="_blank">here</a></p></td>
+							<p class="description">Create one <a href="https://app.mailgun.com/settings/api_security" target="_blank">here</a>.</p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_domain">Mailgun sending domain</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[domain]" id="wpel_domain" type="text" class="regular-text" placeholder="mg.example.com" value="<?php echo esc_attr( isset( $o['domain'] ) ? $o['domain'] : '' ); ?>">
-							<p class="description">Your Mailgun sending domain, e.g., <code>mg.example.com</code>. Create one <a href="https://app.mailgun.com/mg/sending/new-domain" target="_blank">here</a></p></td>
+							<p class="description">e.g. <code>mg.example.com</code>. Create one <a href="https://app.mailgun.com/mg/sending/new-domain" target="_blank">here</a>.</p></td>
 						</tr>
 						<tr>
-							<th scope="row"><label for="wpel_from_name">Default from name</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_name]" id="wpel_from_name" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['from_name'] ) ? $o['from_name'] : '' ); ?>"></td>
+							<th scope="row"><label for="wpel_from_name">From name</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_name]" id="wpel_from_name" type="text" class="regular-text" placeholder="<?php echo esc_attr( wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ); ?>" value="<?php echo esc_attr( isset( $o['from_name'] ) ? $o['from_name'] : '' ); ?>">
+							<p class="description">Leave blank to use the Site Title.</p></td>
 						</tr>
 						<tr>
-							<th scope="row"><label for="wpel_from_email">Default from email</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_email]" id="wpel_from_email" type="email" class="regular-text" value="<?php echo esc_attr( isset( $o['from_email'] ) ? $o['from_email'] : '' ); ?>">
-							<p class="description">Must be on a domain verified in Mailgun, or the send will be rejected.</p></td>
+							<th scope="row"><label for="wpel_from_email">From email</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_email]" id="wpel_from_email" type="email" class="regular-text" placeholder="<?php echo esc_attr( ! empty( $o['smtp_username'] ) ? $o['smtp_username'] : 'wordpress@mg.example.com' ); ?>" value="<?php echo esc_attr( isset( $o['from_email'] ) ? $o['from_email'] : '' ); ?>">
+							<p class="description">Must be on your sending domain.</p></td>
 						</tr>
 						<tr>
 							<th scope="row">Force from address</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from]" value="1" <?php checked( ! empty( $o['force_from'] ) ); ?>> Always use the default from name/email above, even if a plugin/theme sets its own</label>
-							<p class="description">Recommended: many plugins set an unverified From address (e.g. WordPress's own default, <code>wordpress@<?php echo esc_html( wp_parse_url( home_url(), PHP_URL_HOST ) ); ?></code>), which Mailgun will reject unless that exact domain is verified.</p></td>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from]" value="1" <?php checked( ! empty( $o['force_from'] ) ); ?>> Always use the from name/email above, even if a plugin/theme sets its own</label>
+							<p class="description">Recommended, since plugins often set an address Mailgun will reject. Their address is kept as the Reply-To.</p></td>
+						</tr>
+					</table>
+
+					<hr style="margin:24px 0;">
+
+					<h2 class="title">SMTP fallback</h2>
+					<p class="description">Used when the Mailgun API isn't set up. No delivery confirmation or open tracking.</p>
+					<table class="form-table" role="presentation">
+						<tr>
+							<th scope="row"><label for="wpel_smtp_host">SMTP host</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[smtp_host]" id="wpel_smtp_host" type="text" class="regular-text" value="<?php echo esc_attr( ! empty( $o['smtp_host'] ) ? $o['smtp_host'] : 'smtp.mailgun.org' ); ?>"></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_smtp_port">Port</label></th>
+							<td><div style="display:flex;align-items:center;gap:8px;">
+								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[smtp_port]" id="wpel_smtp_port" type="number" min="1" max="65535" value="<?php echo esc_attr( ! empty( $o['smtp_port'] ) ? $o['smtp_port'] : 587 ); ?>" style="width:90px;margin:0;">
+								<select name="<?php echo esc_attr( WPEL_OPTION ); ?>[smtp_encryption]" id="wpel_smtp_encryption" aria-label="Encryption" style="margin:0;">
+									<option value="tls" <?php selected( $smtp_encryption, 'tls' ); ?>>TLS (STARTTLS)</option>
+									<option value="ssl" <?php selected( $smtp_encryption, 'ssl' ); ?>>SSL</option>
+									<option value="none" <?php selected( $smtp_encryption, 'none' ); ?>>None</option>
+								</select>
+							</div>
+							<p class="description">Try <code>2525</code>, or <code>465</code> with SSL, if <code>587</code> is blocked.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_smtp_username">Username</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[smtp_username]" id="wpel_smtp_username" type="text" class="regular-text" autocomplete="off" placeholder="postmaster@mg.example.com" value="<?php echo esc_attr( isset( $o['smtp_username'] ) ? $o['smtp_username'] : '' ); ?>">
+							<p class="description">Clear to turn off the SMTP fallback.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_smtp_password">Password</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[smtp_password]" id="wpel_smtp_password" type="password" class="regular-text" autocomplete="new-password" value="<?php echo ! empty( $o['smtp_password'] ) ? esc_attr( self::SAVED_SECRET_MASK ) : ''; ?>"></td>
 						</tr>
 					</table>
 				</div>
@@ -642,9 +770,34 @@ class WPEL_Admin {
 							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
 							<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
 							<button type="submit" class="button" form="wpel-test-email-form" style="margin-left:8px;">Send test email</button>
-							<p class="description">Separate multiple addresses with a comma. Save changes before sending a test email — it goes through the full Mailgun pipeline and is logged like any other send.</p></td>
+							<p class="description">Separate multiple addresses with a comma. Save changes before sending a test email — it goes through whichever transport is active (currently <?php echo esc_html( $this->transport_label( $transport ) ); ?>) and is logged like any other send.</p></td>
 						</tr>
 						<tr>
+							<th scope="row">SMS alerts</th>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
+							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_account_sid]" id="wpel_twilio_account_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_account_sid'] ) ? $o['twilio_account_sid'] : '' ); ?>" placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+							<p class="description">Starts with <code>AC</code>. Copy it from <strong>Account Info</strong> on the <a href="https://console.twilio.com/" target="_blank">Twilio Console</a> home page.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+							<th scope="row"><label for="wpel_twilio_sid">Twilio API Key SID</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_sid]" id="wpel_twilio_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_sid'] ) ? $o['twilio_sid'] : '' ); ?>" placeholder="SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+							<p class="description">Optional. Starts with <code>SK</code>. Create one under <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">API keys &amp; tokens</a> — unlike the Auth Token, it can be revoked on its own. Leave blank to use the Account SID with your account's Auth Token.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+							<th scope="row"><label for="wpel_twilio_auth_token">Twilio auth token</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_auth_token]" id="wpel_twilio_auth_token" type="password" class="regular-text" autocomplete="new-password" value="<?php echo ! empty( $o['twilio_auth_token'] ) ? esc_attr( self::SAVED_SECRET_MASK ) : ''; ?>">
+							<p class="description">The API key's secret (shown only once, when the key is <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">created</a>), or the <strong>Auth Token</strong> from Account Info on the <a href="https://console.twilio.com/" target="_blank">Twilio Console</a> home page if the API Key SID is blank.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+							<th scope="row"><label for="wpel_twilio_from">Twilio phone number</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_from_number]" id="wpel_twilio_from" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_from_number'] ) ? $o['twilio_from_number'] : '' ); ?>" placeholder="555-123-4567">
+							<p class="description">The number alerts are sent from. Pick one of your <a href="https://console.twilio.com/us1/develop/phone-numbers/manage/incoming" target="_blank">active Twilio numbers</a>.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
 							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
@@ -757,19 +910,41 @@ class WPEL_Admin {
 		} )();
 
 		( function () {
-			// Pre-fill "Default from name/email" from the sending domain as it's
-			// typed, without clobbering a value the admin has since edited by hand.
+			// "Enable SMS alerts" shows/hides the Twilio fields. Hidden fields
+			// still submit, so their saved values survive toggling it off.
+			var toggle = document.getElementById( 'wpel_sms_enabled' );
+			if ( ! toggle ) {
+				return;
+			}
+			var rows = document.querySelectorAll( '.wpel-sms-row' );
+			toggle.addEventListener( 'change', function () {
+				rows.forEach( function ( r ) {
+					r.style.display = toggle.checked ? '' : 'none';
+				} );
+			} );
+		} )();
+
+		( function () {
+			// Pre-fill "From email" from the sending domain as it's typed, without
+			// clobbering a value the admin has since edited by hand. An address on
+			// the SMTP fallback's domain (inherited from the boilerplate) counts as
+			// not hand-edited, so moving a site onto its own domain switches it over.
+			// From name is deliberately never auto-filled: a blank name follows
+			// each site's own Site Title, which matters for cloned sites.
 			var domainInput = document.getElementById( 'wpel_domain' );
-			var nameInput   = document.getElementById( 'wpel_from_name' );
 			var emailInput  = document.getElementById( 'wpel_from_email' );
 			if ( ! domainInput || ! emailInput ) {
 				return;
 			}
 
-			var siteName = <?php echo wp_json_encode( wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ); ?>;
+			var smtpDomain = <?php echo wp_json_encode( WPEL_Mailer::instance()->smtp_domain() ); ?>;
 
 			function deriveEmail( domain ) {
 				return domain ? 'wordpress@' + domain : '';
+			}
+
+			function onSmtpDomain( email ) {
+				return smtpDomain && email.toLowerCase().slice( -( smtpDomain.length + 1 ) ) === '@' + smtpDomain;
 			}
 
 			var lastAutoEmail = emailInput.value === deriveEmail( domainInput.value.trim() ) ? emailInput.value : null;
@@ -777,11 +952,7 @@ class WPEL_Admin {
 			function sync() {
 				var domain = domainInput.value.trim();
 
-				if ( nameInput && ! nameInput.value ) {
-					nameInput.value = siteName;
-				}
-
-				if ( domain && ( ! emailInput.value || emailInput.value === lastAutoEmail ) ) {
+				if ( domain && ( ! emailInput.value || emailInput.value === lastAutoEmail || onSmtpDomain( emailInput.value ) ) ) {
 					lastAutoEmail = deriveEmail( domain );
 					emailInput.value = lastAutoEmail;
 				}
@@ -869,22 +1040,18 @@ class WPEL_Admin {
 		$has_api_key     = ! empty( $o['api_key'] );
 		$has_from_email  = ! empty( $o['from_email'] );
 		$has_webhook     = ! empty( $status['webhook_verified'] );
-		$has_alerts      = ! empty( $o['alert_email'] ) || ! empty( $o['twilio_to_numbers'] );
 		$has_test_email  = ! empty( $status['test_email_sent'] );
 
-		// Shared credentials (see wpel_shared_credential()) — Twilio's only
-		// matter once this site actually has phone numbers to text.
+		// SMS only counts toward the alerts step once it can actually send.
+		$monitor         = WPEL_Mailgun_Monitor::instance();
+		$sms_enabled     = $monitor->sms_enabled();
+		$sms_incomplete  = $sms_enabled && ( empty( $o['twilio_to_numbers'] ) || in_array( '', $monitor->get_twilio_credentials(), true ) );
+		$has_alerts      = ! empty( $o['alert_email'] ) || ( $sms_enabled && ! $sms_incomplete );
+
+		// Shared credentials (see wpel_shared_credential()).
 		$required = array(
 			'WPEL_MAILGUN_SIGNING_KEY' => array( 'signing_key', 'Mailgun HTTP webhook signing key' ),
 		);
-		if ( ! empty( $o['twilio_to_numbers'] ) ) {
-			$required += array(
-				'WPEL_TWILIO_ACCOUNT_SID' => array( 'twilio_account_sid', 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' ),
-				'WPEL_TWILIO_SID'         => array( 'twilio_sid', 'ACxxxx... or SKxxxx...' ),
-				'WPEL_TWILIO_AUTH_TOKEN'  => array( 'twilio_auth_token', 'Twilio auth token or API Key secret' ),
-				'WPEL_TWILIO_FROM_NUMBER' => array( 'twilio_from_number', '+15551234567' ),
-			);
-		}
 		$missing = array();
 		foreach ( $required as $constant => $info ) {
 			if ( ! wpel_shared_credential( $constant, $info[0] ) ) {
@@ -896,11 +1063,22 @@ class WPEL_Admin {
 			&& $has_webhook && $has_alerts && $has_test_email;
 		$done            = '&#9989;';
 		$todo            = '&#11036;';
+
+		$transport_notes = array(
+			'api'     => array( '#1a7f37', '#edfaef', 'Sending via the Mailgun API', 'Delivery confirmation and open tracking are available.' ),
+			'smtp'    => array( '#dba617', '#fcf9e8', 'Sending via the SMTP fallback', 'Mail goes out, but there\'s no delivery confirmation or open tracking until this site has its own domain, API key and webhook (steps below).' ),
+			'default' => array( '#d63638', '#fcf0f1', 'Not sending through Mailgun', 'Mail goes through WordPress\'s default transport (usually PHP mail()). Fill in the SMTP fallback on the Sending tab, or complete the steps below.' ),
+		);
+		$transport_note  = $transport_notes[ WPEL_Mailer::instance()->transport() ];
 		?>
 		<div class="wpel-settings-sidebar">
 			<div class="postbox">
 				<h2 class="hndle" style="padding:10px 12px;margin:0;font-size:14px;">New site setup checklist</h2>
 				<div style="padding:4px 12px 12px;">
+					<div style="border-left:3px solid <?php echo esc_attr( $transport_note[0] ); ?>;background:<?php echo esc_attr( $transport_note[1] ); ?>;padding:8px;margin:8px 0 12px;">
+						<strong><?php echo esc_html( $transport_note[2] ); ?></strong>
+						<p class="description" style="margin:4px 0 0;"><?php echo esc_html( $transport_note[3] ); ?></p>
+					</div>
 					<?php if ( $missing ) : ?>
 						<div style="border-left:3px solid #d63638;background:#fcf0f1;padding:8px;margin:8px 0 12px;">
 							<strong>Missing from wp-config.php</strong>
@@ -920,15 +1098,15 @@ class WPEL_Admin {
 					</form>
 					<ol style="padding-left:18px;">
 						<li><?php echo $has_domain ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Create a <strong>dedicated</strong> Mailgun sending domain for this site and enter it on the <strong>Mailgun Sending</strong> tab. Never reuse another site's domain (see below).
+							Create a <strong>dedicated</strong> Mailgun sending domain for this site and enter it on the <strong>Sending</strong> tab. Never reuse another site's domain (see below). Until steps 1 and 2 are done, mail goes out via the SMTP fallback if it's set up.
 							<br><a href="https://app.mailgun.com/mg/sending/new-domain" target="_blank">Add domain &rarr;</a>
 						</li>
 						<li><?php echo $has_api_key ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Create a Mailgun API key just for this site and paste it on the <strong>Mailgun Sending</strong> tab, so it can be revoked on its own.
+							Create a Mailgun API key just for this site and paste it on the <strong>Sending</strong> tab, so it can be revoked on its own.
 							<br><a href="https://app.mailgun.com/settings/api_security" target="_blank">Create API key &rarr;</a>
 						</li>
 						<li><?php echo $has_from_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set a default From name/email on that domain, and turn on <strong>Force from address</strong>.
+							Set the From email on the <strong>Sending</strong> tab to an address on that domain, and turn on <strong>Force from address</strong>.
 						</li>
 						<li><?php echo $has_webhook ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							In Mailgun, go to <strong>Send &rarr; Webhooks</strong> &rarr; <strong>Add webhook</strong> &rarr; <strong>Domain-level</strong> (not Account-level), pick this site's domain, and subscribe it to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
@@ -941,7 +1119,10 @@ class WPEL_Admin {
 							<br><em>Confirmed automatically by <strong>Check Mailgun config</strong> above once it's set up correctly.</em>
 						</li>
 						<li><?php echo $has_alerts ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set an alert email and/or alert phone number(s) on the <strong>Alerting &amp; Logging</strong> tab.
+							Set an alert email and/or enable SMS alerts on the <strong>Alerting &amp; Logging</strong> tab.
+							<?php if ( $sms_incomplete ) : ?>
+								<br><em>SMS alerts are enabled, but the Twilio settings or alert phone numbers aren't filled in yet, so no texts will be sent.</em>
+							<?php endif; ?>
 						</li>
 						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the Alerting &amp; Logging tab to confirm the whole pipeline end to end.</li>
 					</ol>
@@ -957,6 +1138,66 @@ class WPEL_Admin {
 			</div>
 		</div>
 		<?php
+	}
+
+	/**
+	 * Returns one log row for the Email Log's "View" modal. Fetched on demand
+	 * rather than embedded in the page, since a stored HTML body can easily
+	 * run to tens of KB and the log shows 50 rows at a time.
+	 */
+	public function ajax_log_entry() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( 'You do not have permission to do this.', 403 );
+		}
+		check_ajax_referer( 'wpel_log_entry' );
+
+		global $wpdb;
+		$id  = isset( $_GET['id'] ) ? absint( $_GET['id'] ) : 0;
+		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . WPEL_Mailgun_Monitor::table() . ' WHERE id = %d', $id ) );
+		if ( ! $row ) {
+			wp_send_json_error( 'Log entry not found — it may have been pruned.', 404 );
+		}
+
+		$headers = json_decode( (string) $row->headers, true );
+		$headers = is_array( $headers ) ? array_values( $headers ) : array();
+		$events  = json_decode( (string) $row->event_log, true );
+
+		wp_send_json_success(
+			array(
+				'id'              => (int) $row->id,
+				'created_at'      => $row->created_at,
+				'recipient'       => (string) $row->recipient,
+				'subject'         => (string) $row->subject,
+				'status'          => $row->status,
+				'message_id'      => (string) $row->mailgun_message_id,
+				'error'           => (string) $row->error_message,
+				'open_count'      => (int) $row->open_count,
+				'first_opened_at' => $row->first_opened_at,
+				'last_opened_at'  => $row->last_opened_at,
+				'headers'         => $headers,
+				'events'          => is_array( $events ) ? $events : array(),
+				'body'            => $row->body, // null when body storage was off at send time
+				'is_html'         => $this->body_is_html( $row->body, $headers ),
+			)
+		);
+	}
+
+	/**
+	 * Trusts an explicit Content-Type header when the sender passed one.
+	 * Otherwise sniffs for common tags, since plugins often switch to HTML
+	 * via the wp_mail_content_type filter instead, which never shows up in
+	 * the headers we log.
+	 */
+	private function body_is_html( $body, $headers ) {
+		if ( null === $body || '' === $body ) {
+			return false;
+		}
+		foreach ( $headers as $h ) {
+			if ( preg_match( '/^content-type:\s*([^;]+)/i', (string) $h, $m ) ) {
+				return false !== stripos( $m[1], 'text/html' );
+			}
+		}
+		return (bool) preg_match( '/<(html|body|div|p|table|br|a|span|h[1-6])[\s>\/]/i', $body );
 	}
 
 	public function render_log_page() {
@@ -1016,11 +1257,12 @@ class WPEL_Admin {
 						<th style="width:100px">Status</th>
 						<th style="width:130px">Opens</th>
 						<th>Detail</th>
+						<th style="width:70px">Action</th>
 					</tr>
 				</thead>
 				<tbody>
 				<?php if ( empty( $rows ) ) : ?>
-					<tr><td colspan="7">No entries.</td></tr>
+					<tr><td colspan="8">No entries.</td></tr>
 				<?php else : ?>
 					<?php foreach ( $rows as $r ) :
 						$badge = array(
@@ -1052,6 +1294,7 @@ class WPEL_Admin {
 							}
 							?></td>
 							<td><?php echo esc_html( $r->error_message ? $r->error_message : '' ); ?></td>
+							<td><button type="button" class="button button-small" data-wpel-view="<?php echo (int) $r->id; ?>">View</button></td>
 						</tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
@@ -1077,7 +1320,228 @@ class WPEL_Admin {
 				echo '</div></div>';
 			}
 			?>
+
+			<dialog id="wpel-entry-modal" class="wpel-modal" aria-labelledby="wpel-entry-title">
+				<div class="wpel-modal-inner">
+					<div class="wpel-modal-header">
+						<h2 id="wpel-entry-title">Email</h2>
+						<button type="button" class="wpel-modal-close" data-wpel-close aria-label="Close">&times;</button>
+					</div>
+					<div class="wpel-modal-body">
+						<nav class="nav-tab-wrapper">
+							<a href="#" class="nav-tab" data-tab="info">Info</a>
+							<a href="#" class="nav-tab" data-tab="message">Message</a>
+							<a href="#" class="nav-tab" data-tab="source">Source</a>
+						</nav>
+						<div class="wpel-modal-panel" data-panel="info"></div>
+						<div class="wpel-modal-panel" data-panel="message"></div>
+						<div class="wpel-modal-panel" data-panel="source"></div>
+					</div>
+					<div class="wpel-modal-footer">
+						<button type="button" class="button" data-wpel-close>Close</button>
+					</div>
+				</div>
+			</dialog>
 		</div>
+		<style>
+			.wpel-modal { width: min(1000px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 0; border: 0; border-radius: 4px; box-shadow: 0 5px 30px rgba(0,0,0,.3); }
+			.wpel-modal::backdrop { background: rgba(0,0,0,.6); }
+			.wpel-modal-inner { display: flex; flex-direction: column; max-height: calc(100vh - 64px); }
+			.wpel-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #dcdcde; }
+			.wpel-modal-header h2 { margin: 0; font-size: 18px; }
+			.wpel-modal-close { background: none; border: 0; padding: 4px 8px; font-size: 24px; line-height: 1; color: #646970; cursor: pointer; }
+			.wpel-modal-body { flex: 1 1 auto; overflow: auto; padding: 16px; }
+			.wpel-modal .nav-tab-wrapper { margin-bottom: 12px; padding-top: 0; }
+			.wpel-modal-panel iframe, .wpel-plain, .wpel-source { display: block; box-sizing: border-box; width: 100%; height: 60vh; margin: 0; border: 1px solid #dcdcde; background: #fff; }
+			.wpel-plain, .wpel-source { overflow: auto; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+			.wpel-source { font-size: 12px; }
+			.wpel-info-table th { width: 160px; font-weight: 600; }
+			.wpel-info-table pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+			.wpel-info-table ol { margin: 0 0 0 18px; }
+			.wpel-modal-footer { padding: 12px 16px; border-top: 1px solid #dcdcde; text-align: right; }
+		</style>
+		<script>
+		( function () {
+			var modal = document.getElementById( 'wpel-entry-modal' );
+			if ( ! modal || 'function' !== typeof modal.showModal ) {
+				return;
+			}
+
+			var ajaxUrl     = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+			var nonce       = <?php echo wp_json_encode( wp_create_nonce( 'wpel_log_entry' ) ); ?>;
+			var title       = document.getElementById( 'wpel-entry-title' );
+			var tabs        = modal.querySelectorAll( '.nav-tab' );
+			var sourceTab   = modal.querySelector( '[data-tab="source"]' );
+			var panels      = {};
+			var request     = 0; // ignores a slow response that lands after another entry was opened
+
+			modal.querySelectorAll( '.wpel-modal-panel' ).forEach( function ( p ) {
+				panels[ p.dataset.panel ] = p;
+			} );
+
+			function el( tag, text, className ) {
+				var node = document.createElement( tag );
+				if ( text ) {
+					node.textContent = text;
+				}
+				if ( className ) {
+					node.className = className;
+				}
+				return node;
+			}
+
+			function activate( name ) {
+				tabs.forEach( function ( t ) {
+					t.classList.toggle( 'nav-tab-active', t.dataset.tab === name );
+				} );
+				Object.keys( panels ).forEach( function ( key ) {
+					panels[ key ].style.display = key === name ? '' : 'none';
+				} );
+			}
+
+			function clear() {
+				Object.keys( panels ).forEach( function ( key ) {
+					panels[ key ].textContent = '';
+				} );
+			}
+
+			function addRow( tbody, label, value ) {
+				if ( null === value || undefined === value || '' === value ) {
+					return;
+				}
+				var tr = tbody.insertRow();
+				tr.appendChild( el( 'th', label ) );
+				var td = tr.insertCell();
+				if ( value instanceof Node ) {
+					td.appendChild( value );
+				} else {
+					td.textContent = value;
+				}
+			}
+
+			function renderInfo( d ) {
+				var table = el( 'table', '', 'widefat striped wpel-info-table' );
+				var tbody = table.createTBody();
+
+				addRow( tbody, 'Logged', d.created_at );
+				addRow( tbody, 'To', d.recipient );
+				addRow( tbody, 'Subject', d.subject );
+				addRow( tbody, 'Status', d.status );
+				addRow( tbody, 'Error / detail', d.error );
+				addRow( tbody, 'Mailgun message ID', d.message_id );
+				addRow( tbody, 'Opens', d.open_count > 0
+					? d.open_count + '× (first ' + d.first_opened_at + ', last ' + d.last_opened_at + ')'
+					: 'None recorded' );
+				if ( d.headers.length ) {
+					addRow( tbody, 'Headers', el( 'pre', d.headers.join( '\n' ) ) );
+				}
+				if ( d.events.length ) {
+					var list = el( 'ol' );
+					d.events.forEach( function ( ev ) {
+						list.appendChild( el( 'li', ( ev.t || '' ) + ' — ' + ( ev.e || '' ) ) );
+					} );
+					addRow( tbody, 'Timeline', list );
+				}
+
+				panels.info.appendChild( table );
+			}
+
+			function renderMessage( d ) {
+				if ( null === d.body ) {
+					// Logged before messages were saved, or created straight from
+					// a webhook/failure event with no send captured on this site.
+					panels.message.appendChild( el( 'p', 'No message was saved for this email.' ) );
+					return;
+				}
+				if ( '' === d.body ) {
+					panels.message.appendChild( el( 'p', 'This email had an empty message.' ) );
+					return;
+				}
+				if ( ! d.is_html ) {
+					panels.message.appendChild( el( 'div', d.body, 'wpel-plain' ) );
+					return;
+				}
+
+				// Sandboxed with no allow-scripts/allow-same-origin, so markup
+				// from the email (which can include whatever a visitor typed
+				// into a form) can't run script or touch the admin page. The
+				// injected <base> opens links in a new tab instead of inside
+				// the frame.
+				var base  = '<base target="_blank">';
+				var html  = /<head[^>]*>/i.test( d.body )
+					? d.body.replace( /<head[^>]*>/i, function ( m ) { return m + base; } )
+					: base + d.body;
+				var frame = el( 'iframe' );
+				frame.setAttribute( 'sandbox', 'allow-popups allow-popups-to-escape-sandbox' );
+				frame.setAttribute( 'title', 'Email message' );
+				frame.srcdoc = html;
+				panels.message.appendChild( frame );
+
+				panels.source.appendChild( el( 'pre', d.body, 'wpel-source' ) );
+				sourceTab.style.display = '';
+			}
+
+			function open( id ) {
+				var mine = ++request;
+				clear();
+				title.textContent       = 'Email #' + id;
+				sourceTab.style.display = 'none'; // only meaningful for HTML mail
+				panels.info.appendChild( el( 'p', 'Loading…' ) );
+				activate( 'info' );
+				modal.showModal();
+
+				fetch( ajaxUrl + '?action=wpel_log_entry&id=' + encodeURIComponent( id ) + '&_ajax_nonce=' + encodeURIComponent( nonce ), { credentials: 'same-origin' } )
+					.then( function ( r ) {
+						return r.json();
+					} )
+					.then( function ( res ) {
+						if ( mine !== request ) {
+							return;
+						}
+						clear();
+						if ( ! res || ! res.success ) {
+							panels.info.appendChild( el( 'p', res && 'string' === typeof res.data ? res.data : 'Could not load this log entry. Reload the page and try again.' ) );
+							return;
+						}
+						renderInfo( res.data );
+						renderMessage( res.data );
+						activate( null !== res.data.body ? 'message' : 'info' );
+					} )
+					.catch( function () {
+						if ( mine !== request ) {
+							return;
+						}
+						clear();
+						panels.info.appendChild( el( 'p', 'Could not load this log entry. Reload the page and try again.' ) );
+					} );
+			}
+
+			tabs.forEach( function ( t ) {
+				t.addEventListener( 'click', function ( e ) {
+					e.preventDefault();
+					activate( t.dataset.tab );
+				} );
+			} );
+
+			document.addEventListener( 'click', function ( e ) {
+				var view = e.target.closest( '[data-wpel-view]' );
+				if ( view ) {
+					open( view.getAttribute( 'data-wpel-view' ) );
+					return;
+				}
+				// The dialog itself has no padding, so a click landing on it
+				// directly (not on .wpel-modal-inner) is a click on the backdrop.
+				if ( e.target.closest( '[data-wpel-close]' ) || e.target === modal ) {
+					modal.close();
+				}
+			} );
+
+			modal.addEventListener( 'close', function () {
+				request++;
+				clear(); // drops the iframe so nothing in it keeps loading
+			} );
+		} )();
+		</script>
 		<?php
 	}
 }

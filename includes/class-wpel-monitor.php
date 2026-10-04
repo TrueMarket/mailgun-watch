@@ -23,11 +23,22 @@ class WPEL_Mailgun_Monitor {
 	 * Row id created in the wp_mail filter, consumed by WPEL_Mailer's pre_wp_mail
 	 * hook. The two fire in sequence within a single wp_mail() call ('wp_mail'
 	 * filter, then 'pre_wp_mail' filter), so this hands the just-created row to
-	 * the mailer that knows the real Mailgun send outcome and message id.
+	 * the mailer that knows the real Mailgun send outcome and message id. When
+	 * the mailer declines (SMTP fallback / default transport), it's consumed
+	 * later in the same wp_mail() call by on_local_success() / on_local_failure().
 	 *
 	 * @var int
 	 */
 	private $last_row_id = 0;
+
+	/**
+	 * True while the current wp_mail() call is one of our own alert emails
+	 * (SKIP_HEADER), so the local success/failure handlers ignore it — a
+	 * failed alert email must never raise another alert.
+	 *
+	 * @var bool
+	 */
+	private $last_is_skip = false;
 
 	public static function instance() {
 		if ( ! self::$instance ) {
@@ -37,12 +48,13 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	private function __construct() {
-		// Capture + failure hooks. wp_mail_failed only fires natively for sends
-		// that go through WordPress's default transport (i.e. when WPEL_Mailer
-		// declines to handle a send because Mailgun isn't configured/enabled);
-		// Mailgun API send failures are reported directly by WPEL_Mailer via
-		// mark_failed_and_alert().
+		// Capture + result hooks. wp_mail_succeeded/wp_mail_failed only fire
+		// natively for sends that go through PHPMailer (i.e. when WPEL_Mailer
+		// declines a send and it goes out via the SMTP fallback or WordPress's
+		// default transport); Mailgun API send results are reported directly by
+		// WPEL_Mailer via mark_sent() / mark_failed_and_alert().
 		add_filter( 'wp_mail', array( $this, 'capture_outgoing' ), 99 );
+		add_action( 'wp_mail_succeeded', array( $this, 'on_local_success' ), 10, 1 );
 		add_action( 'wp_mail_failed', array( $this, 'on_local_failure' ), 10, 1 );
 
 		// Webhook endpoint.
@@ -84,7 +96,8 @@ class WPEL_Mailgun_Monitor {
 	public function capture_outgoing( $args ) {
 		// Reset first so a skipped (alert) email or a non-wp_mail send can't leave
 		// a stale id for the next pre_wp_mail call (WPEL_Mailer::send()) to mis-attribute.
-		$this->last_row_id = 0;
+		$this->last_row_id  = 0;
+		$this->last_is_skip = false;
 
 		// Normalize headers to an array of strings (for logging only).
 		$headers = isset( $args['headers'] ) ? $args['headers'] : array();
@@ -98,6 +111,7 @@ class WPEL_Mailgun_Monitor {
 		// WPEL_Mailer::send() skips logging/alerting for this message.
 		foreach ( $headers as $h ) {
 			if ( stripos( $h, 'X-WPEL-Skip' ) === 0 ) {
+				$this->last_is_skip = true;
 				return $args;
 			}
 		}
@@ -107,14 +121,12 @@ class WPEL_Mailgun_Monitor {
 			$to = implode( ', ', $to );
 		}
 
-		$store_body = (int) $this->opt( 'store_body', 0 );
-
 		$this->last_row_id = $this->insert_row(
 			array(
 				'recipient' => $to,
 				'subject'   => isset( $args['subject'] ) ? $args['subject'] : '',
 				'headers'   => wp_json_encode( $headers ),
-				'body'      => $store_body ? ( isset( $args['message'] ) ? $args['message'] : '' ) : null,
+				'body'      => isset( $args['message'] ) ? $args['message'] : '',
 				'status'    => 'pending',
 			)
 		);
@@ -131,8 +143,9 @@ class WPEL_Mailgun_Monitor {
 	 * @return int
 	 */
 	public function consume_last_row_id() {
-		$row_id            = (int) $this->last_row_id;
-		$this->last_row_id = 0;
+		$row_id             = (int) $this->last_row_id;
+		$this->last_row_id  = 0;
+		$this->last_is_skip = false;
 		return $row_id;
 	}
 
@@ -196,16 +209,55 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
+	 * PHPMailer accepted the message: the SMTP fallback (or WordPress's default
+	 * transport) handed it off. That's as far as these sends can be followed —
+	 * there's no webhook for the shared SMTP domain — so 'sent' is final.
+	 *
+	 * Unlike Mailgun API acceptance, an SMTP handoff does count as a success
+	 * for outage detection: it's the only success signal SMTP sends ever get,
+	 * and without it a few scattered failures would look like a total outage.
+	 * PHP mail() returning true proves nothing, so the default transport doesn't.
+	 *
+	 * @param array $mail_data to, subject, message, headers, attachments.
+	 */
+	public function on_local_success( $mail_data ) {
+		$is_skip = $this->last_is_skip;
+		$row_id  = $this->consume_last_row_id();
+		if ( $is_skip || ! $row_id ) {
+			return;
+		}
+
+		if ( 'smtp' === WPEL_Mailer::instance()->transport() ) {
+			$this->update_row( $row_id, array( 'status' => 'sent' ), 'smtp: accepted' );
+			$this->record_success();
+		} else {
+			$this->update_row( $row_id, array( 'status' => 'sent' ), 'wp_mail: sent' );
+		}
+	}
+
+	/**
 	 * Immediate, local (PHP-level) send failure. Only fires for sends that went
-	 * through WordPress's default transport — i.e. WPEL_Mailer declined to
-	 * handle this send because Mailgun isn't configured/enabled (Mailgun API
-	 * failures are reported directly via WPEL_Mailer::send() -> mark_failed_and_alert(),
-	 * which never reaches this handler). A strong signal the site may be
-	 * unable to send at all.
+	 * through PHPMailer — i.e. WPEL_Mailer declined to handle this send and it
+	 * went out via the SMTP fallback or WordPress's default transport (Mailgun
+	 * API failures are reported directly via WPEL_Mailer::send() ->
+	 * mark_failed_and_alert(), which never reaches this handler). A strong
+	 * signal the site may be unable to send at all.
 	 *
 	 * @param WP_Error $error
 	 */
 	public function on_local_failure( $error ) {
+		// One of our own alert emails failing must not raise another alert
+		// (which would send another alert email, which would fail, ...).
+		$is_skip = $this->last_is_skip;
+		$row_id  = $this->consume_last_row_id();
+		if ( $is_skip ) {
+			return;
+		}
+
+		$mailer = WPEL_Mailer::instance();
+		$smtp   = 'smtp' === $mailer->transport();
+		$source = $smtp ? 'SMTP send (' . $mailer->smtp_host() . ')' : 'local wp_mail_failed';
+
 		$data       = $error->get_error_data();
 		$to         = '';
 		$subject    = '';
@@ -215,8 +267,11 @@ class WPEL_Mailgun_Monitor {
 		}
 		$message = $error->get_error_message();
 
-		// Try to attach to the most recent matching pending row; otherwise log a new failed row.
-		$row_id = $this->find_recent_pending( $to, $subject );
+		// Attach to the row captured for this send, else the most recent matching
+		// pending row; otherwise log a new failed row.
+		if ( ! $row_id || ! $this->row_exists( $row_id ) ) {
+			$row_id = $this->find_recent_pending( $to, $subject );
+		}
 		if ( $row_id ) {
 			$this->update_row(
 				$row_id,
@@ -224,7 +279,7 @@ class WPEL_Mailgun_Monitor {
 					'status'        => 'failed',
 					'error_message' => $message,
 				),
-				'local_failure: ' . $message
+				( $smtp ? 'smtp: ' : 'local_failure: ' ) . $message
 			);
 		} else {
 			$row_id = $this->insert_row(
@@ -242,7 +297,7 @@ class WPEL_Mailgun_Monitor {
 				'recipient'  => $to,
 				'subject'    => $subject,
 				'reason'     => $message,
-				'source'     => 'local wp_mail_failed',
+				'source'     => $source,
 				'row_id'     => $row_id,
 				'dedupe_key' => 'send:' . $row_id, // shares the key space WPEL_Mailer uses for the same row
 			)
@@ -277,6 +332,18 @@ class WPEL_Mailgun_Monitor {
 
 		$event = isset( $payload['event-data'] ) ? $payload['event-data'] : array();
 		$type  = isset( $event['event'] ) ? $event['event'] : '';
+
+		// The SMTP fallback domain is shared by every site, and the signing key
+		// is account-wide, so a webhook registered on that domain would deliver
+		// (validly signed) events for every site's SMTP mail here — and the
+		// "create a fresh row" fallback below would fill this site's log with
+		// them. Acknowledge with a 200 so Mailgun doesn't retry, but drop them.
+		$event_domain = $this->event_sending_domain( $event );
+		$smtp_domain  = WPEL_Mailer::instance()->smtp_domain();
+		$api_domain   = strtolower( trim( (string) $this->opt( 'domain', '' ) ) );
+		if ( $event_domain && $event_domain === $smtp_domain && $event_domain !== $api_domain ) {
+			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'smtp fallback domain' ), 200 );
+		}
 
 		$recipient  = isset( $event['recipient'] ) ? $event['recipient'] : '';
 		$message_id = isset( $event['message']['headers']['message-id'] ) ? $this->normalize_message_id( $event['message']['headers']['message-id'] ) : '';
@@ -366,6 +433,22 @@ class WPEL_Mailgun_Monitor {
 		}
 
 		return new WP_REST_Response( array( 'ok' => true ), 200 );
+	}
+
+	/**
+	 * Sending domain a webhook event belongs to, from the envelope sender
+	 * (Mailgun's bounce address on the sending domain), else the From header.
+	 * Lowercased; '' when neither is present.
+	 */
+	private function event_sending_domain( $event ) {
+		$address = '';
+		if ( ! empty( $event['envelope']['sender'] ) ) {
+			$address = (string) $event['envelope']['sender'];
+		} elseif ( ! empty( $event['message']['headers']['from'] ) ) {
+			$address = (string) $event['message']['headers']['from'];
+		}
+		$at = strrpos( $address, '@' );
+		return false === $at ? '' : strtolower( trim( substr( $address, $at + 1 ), " \t<>\"'" ) );
 	}
 
 	/**
@@ -521,9 +604,24 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * Resolves the four Twilio credentials from their wp-config.php
-	 * constants (see wpel_shared_credential()) — shared across every site
-	 * on one Twilio account, so they aren't shown in Settings.
+	 * Whether SMS alerts are switched on in Settings. Installs saved before
+	 * the toggle existed have no sms_enabled key; they count as enabled if
+	 * they already had alert phone numbers, so upgrading doesn't silently
+	 * stop their texts.
+	 */
+	public function sms_enabled() {
+		$o = get_option( WPEL_OPTION, array() );
+		if ( isset( $o['sms_enabled'] ) ) {
+			return ! empty( $o['sms_enabled'] );
+		}
+		return ! empty( $o['twilio_to_numbers'] );
+	}
+
+	/**
+	 * Resolves the four Twilio credentials, saved in Settings (Alerting &
+	 * Logging tab, under "SMS alerts"). A blank field falls back to its
+	 * WPEL_TWILIO_* constant, for sites set up while these lived only in
+	 * wp-config.php.
 	 *
 	 *   account_sid  the real Account SID (starts with AC) — always goes in
 	 *                the URL path, regardless of which credential pair
@@ -532,18 +630,30 @@ class WPEL_Mailgun_Monitor {
 	 *                auth_token (the master auth token), OR an API Key SID
 	 *                (starts with SK) + its Secret. Twilio accepts both pairs
 	 *                equally for auth; only the URL path requires the real
-	 *                Account SID.
+	 *                Account SID. Blank = the Account SID.
 	 *   from_number  the sending number, E.164 format (+1...).
 	 *
 	 * @return array{account_sid: string, sid: string, auth_token: string, from_number: string}
 	 */
-	private function get_twilio_credentials() {
-		return array(
-			'account_sid' => wpel_shared_credential( 'WPEL_TWILIO_ACCOUNT_SID', 'twilio_account_sid' ),
-			'sid'         => wpel_shared_credential( 'WPEL_TWILIO_SID', 'twilio_sid' ),
-			'auth_token'  => wpel_shared_credential( 'WPEL_TWILIO_AUTH_TOKEN', 'twilio_auth_token' ),
-			'from_number' => wpel_shared_credential( 'WPEL_TWILIO_FROM_NUMBER', 'twilio_from_number' ),
+	public function get_twilio_credentials() {
+		$creds = array(
+			'account_sid' => $this->twilio_setting( 'twilio_account_sid', 'WPEL_TWILIO_ACCOUNT_SID' ),
+			'sid'         => $this->twilio_setting( 'twilio_sid', 'WPEL_TWILIO_SID' ),
+			'auth_token'  => $this->twilio_setting( 'twilio_auth_token', 'WPEL_TWILIO_AUTH_TOKEN' ),
+			'from_number' => $this->twilio_setting( 'twilio_from_number', 'WPEL_TWILIO_FROM_NUMBER' ),
 		);
+		if ( '' === $creds['sid'] ) {
+			$creds['sid'] = $creds['account_sid'];
+		}
+		return $creds;
+	}
+
+	private function twilio_setting( $key, $constant ) {
+		$value = trim( (string) $this->opt( $key, '' ) );
+		if ( '' === $value && defined( $constant ) ) {
+			$value = trim( (string) constant( $constant ) );
+		}
+		return $value;
 	}
 
 	/**
@@ -556,6 +666,9 @@ class WPEL_Mailgun_Monitor {
 	 * @param string $body
 	 */
 	private function notify_twilio( $body ) {
+		if ( ! $this->sms_enabled() ) {
+			return;
+		}
 		$creds = $this->get_twilio_credentials();
 		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
 			return;
@@ -599,13 +712,23 @@ class WPEL_Mailgun_Monitor {
 	 *         numbers saved).
 	 */
 	public function send_test_sms( $body ) {
+		if ( ! $this->sms_enabled() ) {
+			return array(
+				array(
+					'to'     => '',
+					'ok'     => false,
+					'detail' => 'SMS alerts are turned off — tick "Enable SMS alerts" on the Alerting & Logging tab, save, then try again.',
+				),
+			);
+		}
+
 		$creds = $this->get_twilio_credentials();
 		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
 			return array(
 				array(
 					'to'     => '',
 					'ok'     => false,
-					'detail' => 'Twilio isn\'t configured — define WPEL_TWILIO_ACCOUNT_SID, WPEL_TWILIO_SID, WPEL_TWILIO_AUTH_TOKEN and WPEL_TWILIO_FROM_NUMBER in wp-config.php.',
+					'detail' => 'Twilio isn\'t configured — fill in the Account SID, auth token and Twilio phone number on the Alerting & Logging tab, save, then try again.',
 				),
 			);
 		}

@@ -2,15 +2,23 @@
 Contributors: jimlaroche
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Stable tag: 2.2.8
+Stable tag: 2.2.9
 
 Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, reconciles delivery via Mailgun webhooks, and alerts on failure.
 
 == Description ==
 
-Mailgun Watch replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). See README.md in the plugin folder for full setup and configuration details.
+Mailgun Watch replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
 
 == Changelog ==
+
+= 2.2.9 =
+* Added SMTP fallback sending through a shared Mailgun SMTP login for sites without their own Mailgun API key/domain (sent/failed logging only, masked password, no retry of failed API sends, webhook events from the shared domain ignored), and showed the active transport on the Settings page and in test email results
+* Updated the Sending tab (renamed from Mailgun Sending): merged the From name/email into one setting for both transports, with a blank name using the Site Title, and made Force from address keep the overridden From as the Reply-To
+* Added Twilio settings to the Alerting & Logging tab behind an Enable SMS alerts toggle, replacing the wp-config.php constants (still used as a fallback), with a masked auth token, E.164 validation of the phone number and a checklist warning when SMS setup is incomplete
+* Saved every logged email's message and removed the store message body setting
+* Added a View button to the Email Log that opened the message, headers and event timeline in a modal
+* Updated the README and inline docs
 
 = 2.2.8 =
 * Updated Mailgun setup instructions

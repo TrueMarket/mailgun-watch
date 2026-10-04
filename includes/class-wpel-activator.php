@@ -78,20 +78,35 @@ class WPEL_Activator {
 		// Seed default settings if empty.
 		$defaults = array(
 			// Mailgun API sending (replaces WP Mail SMTP / any other SMTP plugin).
-			// The signing key and Twilio credentials come from wp-config.php
-			// instead — see wpel_shared_credential().
+			// The webhook signing key comes from wp-config.php instead — see
+			// wpel_shared_credential().
 			'sending_enabled'  => 1,
 			'api_key'          => '',
 			'domain'           => '',
-			'from_email'       => get_option( 'admin_email' ),
-			'from_name'        => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
+			// Blank = resolved at send time (Site Title; SMTP login or admin
+			// email), so values don't carry over from the boilerplate to clones.
+			'from_email'       => '',
+			'from_name'        => '',
 			'force_from'       => 1,
 			'track_opens'      => 0,
+			// SMTP fallback, used when the API above isn't set up. Shares the
+			// From name/email above.
+			'smtp_host'        => 'smtp.mailgun.org',
+			'smtp_port'        => 587,
+			'smtp_encryption'  => 'tls',
+			'smtp_username'    => '',
+			'smtp_password'    => '',
 			// Logging + alerting.
 			'alert_email'      => get_option( 'admin_email' ),
 			'slack_webhook'    => '', // saved but currently unused -- Slack alerting is disabled and hidden
-			'twilio_to_numbers' => '',
-			'store_body'       => 0,
+			// SMS via Twilio. sms_enabled is deliberately not seeded: a missing
+			// key means "on if numbers are set" (see WPEL_Mailgun_Monitor::sms_enabled()),
+			// which keeps texts going on sites upgraded from before the toggle.
+			'twilio_account_sid' => '',
+			'twilio_sid'         => '',
+			'twilio_auth_token'  => '',
+			'twilio_from_number' => '',
+			'twilio_to_numbers'  => '',
 			'retention_days'   => 30,
 			'alert_temp_fail'  => 0,
 			'outage_threshold' => 5,

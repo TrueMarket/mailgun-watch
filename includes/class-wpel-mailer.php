@@ -9,6 +9,16 @@
  * filter) always runs first within a single wp_mail() call and logs a
  * pending row; this class consumes that row id and updates it with the real
  * send outcome once Mailgun's API responds.
+ *
+ * SMTP FALLBACK: when this site has no Mailgun API key/domain (or API
+ * sending is switched off), send() declines and wp_mail() carries on with
+ * core's PHPMailer, which configure_smtp() points at Mailgun's SMTP server
+ * using the shared credentials in the Sending tab's SMTP fallback section.
+ * Those sends get no delivery/open tracking (the SMTP domain is shared, and
+ * webhooks are per domain); the monitor marks them sent/failed from core's
+ * wp_mail_succeeded/wp_mail_failed instead. An API send that fails is NOT
+ * retried over SMTP: a timeout doesn't prove Mailgun rejected the message,
+ * so a retry could send it twice, and a broken API setup should stay visible.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -31,6 +41,12 @@ class WPEL_Mailer {
 	private $force_from;
 	private $track_opens;
 
+	private $smtp_host;
+	private $smtp_port;
+	private $smtp_encryption;
+	private $smtp_username;
+	private $smtp_password;
+
 	public static function instance() {
 		if ( ! self::$instance ) {
 			self::$instance = new self();
@@ -46,18 +62,127 @@ class WPEL_Mailer {
 		$this->enabled    = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
 		$this->api_key    = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
 		$this->domain     = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
-		$this->from_email = isset( $o['from_email'] ) && $o['from_email'] ? $o['from_email'] : get_option( 'admin_email' );
-		$this->from_name  = isset( $o['from_name'] ) && $o['from_name'] ? $o['from_name'] : wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		$this->force_from = ! empty( $o['force_from'] );
 		$this->track_opens = ! empty( $o['track_opens'] );
 
+		$this->smtp_host       = ! empty( $o['smtp_host'] ) ? trim( $o['smtp_host'] ) : 'smtp.mailgun.org';
+		$this->smtp_port       = ! empty( $o['smtp_port'] ) ? (int) $o['smtp_port'] : 587;
+		$this->smtp_encryption = ! empty( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
+		$this->smtp_username   = isset( $o['smtp_username'] ) ? trim( $o['smtp_username'] ) : '';
+		$this->smtp_password   = isset( $o['smtp_password'] ) ? (string) $o['smtp_password'] : '';
+
+		// One From for both the API and the SMTP fallback. Settings are usually
+		// set once on the boilerplate and cloned with its database, so a blank
+		// name falls back to *this* site's Site Title at send time, and a blank
+		// email to the SMTP login (an address on the SMTP domain) while the site
+		// is on the fallback.
+		$this->from_name = isset( $o['from_name'] ) && $o['from_name'] ? $o['from_name'] : wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+		if ( isset( $o['from_email'] ) && $o['from_email'] ) {
+			$this->from_email = $o['from_email'];
+		} elseif ( 'smtp' === $this->transport() ) {
+			$this->from_email = $this->smtp_username;
+		} else {
+			$this->from_email = get_option( 'admin_email' );
+		}
+
 		add_filter( 'pre_wp_mail', array( $this, 'send' ), 10, 2 );
+		add_action( 'phpmailer_init', array( $this, 'configure_smtp' ) );
+	}
+
+	/**
+	 * Which transport wp_mail() will use right now:
+	 *   'api'     this site's own Mailgun domain + API key (full tracking)
+	 *   'smtp'    the shared Mailgun SMTP fallback (sent/failed only)
+	 *   'default' neither is set up — core's own transport, usually PHP mail()
+	 *
+	 * @return string
+	 */
+	public function transport() {
+		if ( $this->enabled && $this->api_key && $this->domain ) {
+			return 'api';
+		}
+		if ( $this->smtp_username && $this->smtp_password ) {
+			return 'smtp';
+		}
+		return 'default';
+	}
+
+	/** Domain of the SMTP fallback's login (e.g. mg.truemarket.io), lowercased; '' if unset. */
+	public function smtp_domain() {
+		$at = strrpos( $this->smtp_username, '@' );
+		return false === $at ? '' : strtolower( substr( $this->smtp_username, $at + 1 ) );
+	}
+
+	/** SMTP host, for admin notices and alert messages. */
+	public function smtp_host() {
+		return $this->smtp_host;
+	}
+
+	/**
+	 * phpmailer_init callback: points core's PHPMailer at Mailgun's SMTP server
+	 * whenever the API isn't handling the send. Picks the From exactly as the
+	 * API path does (see send_via_api()); when "Force from address" overrides a
+	 * From a plugin/theme set, that address is kept reachable as the Reply-To.
+	 *
+	 * @param PHPMailer\PHPMailer\PHPMailer $phpmailer
+	 */
+	public function configure_smtp( $phpmailer ) {
+		if ( 'smtp' !== $this->transport() ) {
+			return;
+		}
+
+		$phpmailer->isSMTP();
+		$phpmailer->Host     = $this->smtp_host;
+		$phpmailer->Port     = $this->smtp_port;
+		$phpmailer->SMTPAuth = true;
+		$phpmailer->Username = $this->smtp_username;
+		$phpmailer->Password = $this->smtp_password;
+		$phpmailer->Timeout  = 20; // PHPMailer's default is 300s, far too long to stall a page load
+
+		if ( 'none' === $this->smtp_encryption ) {
+			$phpmailer->SMTPSecure  = '';
+			$phpmailer->SMTPAutoTLS = false;
+		} else {
+			$phpmailer->SMTPSecure = $this->smtp_encryption; // 'tls' (STARTTLS, 587/2525) or 'ssl' (465)
+		}
+
+		// Core has already resolved From: the caller's From header, or its own
+		// wordpress@<host> default when nobody set one.
+		$original_from = $phpmailer->From;
+		$original_name = $phpmailer->FromName;
+		$caller_set    = $original_from && strtolower( $original_from ) !== strtolower( $this->core_default_from() );
+
+		if ( $this->force_from || ! $caller_set ) {
+			$phpmailer->From     = $this->from_email;
+			$phpmailer->FromName = $this->from_name;
+			$phpmailer->Sender   = $this->from_email;
+
+			if ( $caller_set
+				&& strtolower( $original_from ) !== strtolower( $this->from_email )
+				&& ! $phpmailer->getReplyToAddresses()
+			) {
+				$phpmailer->addReplyTo( $original_from, $original_name );
+			}
+		}
+
+		// Shows up in Mailgun's logs as a user variable, so mail from the many
+		// sites sharing this domain can be told apart.
+		$phpmailer->addCustomHeader( 'X-Mailgun-Variables', wp_json_encode( array( 'wpel_site' => wp_parse_url( home_url(), PHP_URL_HOST ) ) ) );
+	}
+
+	/** wordpress@<site host>, the From address core falls back to when nobody sets one (mirrors wp_mail()). */
+	private function core_default_from() {
+		$host = strtolower( (string) wp_parse_url( network_home_url(), PHP_URL_HOST ) );
+		if ( 0 === strpos( $host, 'www.' ) ) {
+			$host = substr( $host, 4 );
+		}
+		return 'wordpress@' . $host;
 	}
 
 	/**
 	 * pre_wp_mail callback. Returning null lets wp_mail() proceed with
-	 * WordPress's normal transport (used when Mailgun isn't configured or
-	 * sending is switched off); returning true/false short-circuits wp_mail()
+	 * PHPMailer (SMTP fallback, or WordPress's default transport when that
+	 * isn't set up either); returning true/false short-circuits wp_mail()
 	 * with that value and skips PHPMailer entirely.
 	 *
 	 * @param null|bool $null Always null coming in.
@@ -65,12 +190,14 @@ class WPEL_Mailer {
 	 * @return null|bool
 	 */
 	public function send( $null, $atts ) {
+		if ( 'api' !== $this->transport() ) {
+			// Leave the pending row for the monitor's wp_mail_succeeded /
+			// wp_mail_failed handlers, which see how PHPMailer's send went.
+			return null;
+		}
+
 		$monitor = WPEL_Mailgun_Monitor::instance();
 		$row_id  = $monitor->consume_last_row_id();
-
-		if ( ! $this->enabled || ! $this->api_key || ! $this->domain ) {
-			return null; // not configured / disabled — fall through to WP's default transport
-		}
 
 		$to          = isset( $atts['to'] ) ? $atts['to'] : '';
 		$subject     = isset( $atts['subject'] ) ? $atts['subject'] : '';
@@ -126,6 +253,16 @@ class WPEL_Mailer {
 		}
 		if ( $parsed['reply_to'] ) {
 			$fields['h:Reply-To'] = $parsed['reply_to'];
+		} elseif ( $this->force_from
+			&& $parsed['from_email']
+			&& strtolower( $parsed['from_email'] ) !== strtolower( $this->from_email )
+			&& strtolower( $parsed['from_email'] ) !== strtolower( $this->core_default_from() )
+		) {
+			// Same as configure_smtp(): a From a plugin/theme set that "Force
+			// from address" overrode stays reachable as the Reply-To.
+			$fields['h:Reply-To'] = $parsed['from_name']
+				? '"' . addcslashes( $parsed['from_name'], '"\\' ) . '" <' . $parsed['from_email'] . '>'
+				: $parsed['from_email'];
 		}
 		if ( $this->track_opens ) {
 			// Mailgun only embeds the pixel in the HTML part; harmless to send on
