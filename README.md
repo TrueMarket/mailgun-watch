@@ -46,7 +46,7 @@ This plugin **is** the Mailgun transport — it doesn't sit alongside another SM
 ## Sending behavior
 
 - **From name/email**: one setting, used whether a send goes through the Mailgun API or the SMTP fallback. A blank name means the Site Title; a blank email means the SMTP username while on the fallback (otherwise the admin email).
-- **Force from address** (on by default): always sends using the configured from name/email, regardless of what a plugin/theme sets via `wp_mail()`'s headers; the address it overrode is kept as the **Reply-To** (unless the email already has one), so replies still reach it. Turn this off if you specifically want per-email From addresses honored — but they must all be on Mailgun-verified domains, or those sends will fail.
+- **Force from name** and **Force from email** (both on by default, each under its own field): always send using the configured name/email, regardless of what a plugin/theme sets via `wp_mail()`'s headers. When the email is forced, the address it overrode is kept as the **Reply-To** (unless the email already has one), so replies still reach it. Turn **Force from email** off if you specifically want per-email From addresses honored — but they must all be on Mailgun-verified domains, or those sends will fail. Sites that haven't saved Settings since these were split from the old single **Force from address** setting keep its value for both.
 - **Send via Mailgun API** toggle (on by default, including on installs that activated before this option existed): an emergency off-switch. When disabled, `wp_mail()` falls through to the SMTP fallback, or to WordPress's default transport (usually PHP `mail()`, which most hosts don't deliver reliably) if that isn't set up either — logging and alerting still work either way.
 - HTML vs. plain text, Cc/Bcc, Reply-To, and file attachments (via hand-built `multipart/form-data`, since WordPress's HTTP API has no upload helper) are all forwarded to the Mailgun API.
 
@@ -63,7 +63,7 @@ Which transport a send uses:
 The settings sidebar shows which one is active, and **Send test email** reports which one it used.
 
 - A failed **API** send is logged and alerted, but never retried over SMTP: a timeout doesn't prove Mailgun rejected the message, so a retry could deliver it twice, and a broken per-site setup should stay visible rather than be quietly papered over.
-- SMTP sends use the same From name/email and **Force from address** rules as API sends, including keeping an overridden From as the Reply-To. An `X-Mailgun-Variables` header tags each message with the site's host, so sites are easy to tell apart in Mailgun's logs.
+- SMTP sends use the same From name/email and **Force from name** / **Force from email** rules as API sends, including keeping an overridden From as the Reply-To. An `X-Mailgun-Variables` header tags each message with the site's host, so sites are easy to tell apart in Mailgun's logs.
 - **Don't add a webhook for the shared SMTP domain** in Mailgun — one site would receive every other site's events. The webhook endpoint ignores events from that domain anyway (unless it's also this site's own API domain).
 - A Mailgun SMTP acceptance counts as a success for outage detection (it's the only success signal SMTP sends get); PHP `mail()` returning true doesn't.
 - To turn the fallback off, clear its username. Once saved, the password (like the Twilio auth token) shows as dots and is never printed into the page. Leaving the dots alone keeps it.
@@ -71,10 +71,14 @@ The settings sidebar shows which one is active, and **Send test email** reports 
 ## Alerting logic
 
 - Every failure → **SMS via Twilio** to every configured number (when SMS alerts are enabled) **+ alert email** (best effort, itself sent through Mailgun).
-- A burst of failures with no successful sends in the window → a distinct **"POSSIBLE TOTAL EMAIL OUTAGE"** text (throttled to one per window). This is the case where the alert email itself can't get out, which is exactly what SMS covers.
+- **Repeats are grouped:** after a failure alert, failures with the same recipient and reason (say, every Wordfence email to an address Mailgun refuses) aren't alerted again for an hour. They're still logged, and the next alert for that recipient + reason says how many were held back.
+- **At most 10 alert texts an hour**, whatever triggers them. The text that hits the limit says so, and the first one after the hour says how many weren't sent. Alert emails aren't capped. Change the limit with the `wpel_sms_max_per_hour` filter (`0` turns it off).
+- Webhook events for the plugin's **own alert emails are ignored** (they're tagged with a Mailgun variable when sent). Otherwise a bouncing alert address would turn each bounced alert into a new failure, a new alert, another bounce, and so on.
+- A burst of failures with no successful sends in the window → a distinct **"POSSIBLE TOTAL EMAIL OUTAGE"** text (throttled to one per window). This is the case where the alert email itself can't get out, which is exactly what SMS covers. It's sent even when the hourly text limit has been reached.
+- **Unopened emails:** the hourly check sends one text for everything it flags in that run (a list when there's more than one), and each email is flagged once.
 - Slack support (`notify_slack()` in `includes/class-wpel-monitor.php`) is still in the code but every call site is currently commented out in favor of Twilio SMS, and the Settings field is hidden (not removed — see `render_settings_page()`). Uncomment the calls (in `handle_failure()`, `notify_outage_alarm()`, and `notify_unopened()`) and un-hide the field to run Slack alongside SMS again — the saved webhook URL, if any, is untouched.
 
-Thresholds and retention are on the Settings page. Every logged email's message is saved and can be viewed from the Email Log (**View**), and is deleted with its log entry once the retention period passes.
+Thresholds and retention are on the Settings page. Every logged email's message is saved and can be viewed from the Email Log (**View**), and is deleted with its log entry once the retention period passes. Tick entries in the Email Log to **Delete** them or **Resend** them via the Bulk actions menu; a resend goes out as a new log entry (without attachments, which aren't saved), and entries created only from Mailgun events have no message to resend.
 
 ## Shared credentials (wp-config.php)
 

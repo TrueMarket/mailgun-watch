@@ -87,7 +87,8 @@ class WPEL_Activator {
 			// email), so values don't carry over from the boilerplate to clones.
 			'from_email'       => '',
 			'from_name'        => '',
-			'force_from'       => 1,
+			'force_from_name'  => 1,
+			'force_from_email' => 1,
 			'track_opens'      => 0,
 			// SMTP fallback, used when the API above isn't set up. Shares the
 			// From name/email above.
@@ -115,6 +116,14 @@ class WPEL_Activator {
 			'unopened_hours'   => 24,
 		);
 		$existing = get_option( WPEL_OPTION, array() );
+		if ( is_array( $existing ) && isset( $existing['force_from'] ) ) {
+			// Carry the old combined "Force from address" over to both halves,
+			// rather than letting the defaults above switch it back on.
+			foreach ( array( 'name', 'email' ) as $which ) {
+				$existing[ 'force_from_' . $which ] = wpel_force_from( $existing, $which ) ? 1 : 0;
+			}
+			unset( $existing['force_from'] );
+		}
 		update_option( WPEL_OPTION, array_merge( $defaults, is_array( $existing ) ? $existing : array() ) );
 	}
 

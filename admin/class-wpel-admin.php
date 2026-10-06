@@ -44,6 +44,8 @@ class WPEL_Admin {
 		add_action( 'admin_post_wpel_check_mailgun_config', array( $this, 'handle_check_mailgun_config' ) );
 		add_action( 'admin_notices', array( $this, 'mailgun_config_check_notice' ) );
 		add_action( 'wp_ajax_wpel_log_entry', array( $this, 'ajax_log_entry' ) );
+		add_action( 'admin_post_wpel_log_bulk', array( $this, 'handle_log_bulk' ) );
+		add_filter( 'removable_query_args', array( $this, 'removable_query_args' ) );
 	}
 
 	public function register_settings() {
@@ -60,7 +62,8 @@ class WPEL_Admin {
 		$out['domain']          = sanitize_text_field( isset( $input['domain'] ) ? $input['domain'] : '' );
 		$out['from_name']        = sanitize_text_field( isset( $input['from_name'] ) ? $input['from_name'] : '' );
 		$out['from_email']       = sanitize_email( isset( $input['from_email'] ) ? $input['from_email'] : '' );
-		$out['force_from']       = ! empty( $input['force_from'] ) ? 1 : 0;
+		$out['force_from_name']  = ! empty( $input['force_from_name'] ) ? 1 : 0;
+		$out['force_from_email'] = ! empty( $input['force_from_email'] ) ? 1 : 0;
 		// SMTP fallback.
 		$out['smtp_host']        = sanitize_text_field( ! empty( $input['smtp_host'] ) ? $input['smtp_host'] : 'smtp.mailgun.org' );
 		$smtp_port               = isset( $input['smtp_port'] ) ? (int) $input['smtp_port'] : 587;
@@ -714,17 +717,16 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row"><label for="wpel_from_name">From name</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_name]" id="wpel_from_name" type="text" class="regular-text" placeholder="<?php echo esc_attr( wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ); ?>" value="<?php echo esc_attr( isset( $o['from_name'] ) ? $o['from_name'] : '' ); ?>">
-							<p class="description">Leave blank to use the Site Title.</p></td>
+							<p class="description">Leave blank to use the Site Title.</p>
+							<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from_name]" value="1" <?php checked( wpel_force_from( $o, 'name' ) ); ?>> Force from name</label></p>
+							<p class="description">Always use this name, even if a plugin/theme sets its own.</p></td>
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_from_email">From email</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_email]" id="wpel_from_email" type="email" class="regular-text" placeholder="<?php echo esc_attr( ! empty( $o['smtp_username'] ) ? $o['smtp_username'] : 'wordpress@mg.example.com' ); ?>" value="<?php echo esc_attr( isset( $o['from_email'] ) ? $o['from_email'] : '' ); ?>">
-							<p class="description">Must be on your sending domain.</p></td>
-						</tr>
-						<tr>
-							<th scope="row">Force from address</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from]" value="1" <?php checked( ! empty( $o['force_from'] ) ); ?>> Always use the from name/email above, even if a plugin/theme sets its own</label>
-							<p class="description">Recommended, since plugins often set an address Mailgun will reject. Their address is kept as the Reply-To.</p></td>
+							<p class="description">Must be on your sending domain.</p>
+							<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from_email]" value="1" <?php checked( wpel_force_from( $o, 'email' ) ); ?>> Force from email</label></p>
+							<p class="description">Always use this address, even if a plugin/theme sets its own.</p></td>
 						</tr>
 					</table>
 
@@ -775,7 +777,7 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">SMS alerts</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio.</p></td>
+							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio. Repeats of the same failure are grouped for an hour, and at most 10 alert texts are sent per hour.</p></td>
 						</tr>
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
@@ -790,11 +792,11 @@ class WPEL_Admin {
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_auth_token">Twilio auth token</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_auth_token]" id="wpel_twilio_auth_token" type="password" class="regular-text" autocomplete="new-password" value="<?php echo ! empty( $o['twilio_auth_token'] ) ? esc_attr( self::SAVED_SECRET_MASK ) : ''; ?>">
-							<p class="description">The API key's secret (shown only once, when the key is <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">created</a>), or the <strong>Auth Token</strong> from Account Info on the <a href="https://console.twilio.com/" target="_blank">Twilio Console</a> home page if the API Key SID is blank.</p></td>
+							<p class="description">The API key's secret. Click "show" on the Twilio dashboard to see the token <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">here</a></td>
 						</tr>
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_from">Twilio phone number</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_from_number]" id="wpel_twilio_from" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_from_number'] ) ? $o['twilio_from_number'] : '' ); ?>" placeholder="555-123-4567">
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_from_number]" id="wpel_twilio_from" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_from_number'] ) ? $o['twilio_from_number'] : '' ); ?>" placeholder="+555-123-4567">
 							<p class="description">The number alerts are sent from. Pick one of your <a href="https://console.twilio.com/us1/develop/phone-numbers/manage/incoming" target="_blank">active Twilio numbers</a>.</p></td>
 						</tr>
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
@@ -826,7 +828,7 @@ class WPEL_Admin {
 							<th scope="row">Alert on unopened email</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_unopened]" value="1" <?php checked( ! empty( $o['alert_unopened'] ) ); ?>> Alert by SMS when a delivered email still hasn't been opened after</label>
 							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours
-							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron; each email is only alerted once.</p></td>
+							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron; each email is only alerted once, and each check sends at most one text listing everything it found.</p></td>
 						</tr>
 						<tr>
 							<th scope="row">Webhook endpoint</th>
@@ -1106,7 +1108,7 @@ class WPEL_Admin {
 							<br><a href="https://app.mailgun.com/settings/api_security" target="_blank">Create API key &rarr;</a>
 						</li>
 						<li><?php echo $has_from_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set the From email on the <strong>Sending</strong> tab to an address on that domain, and turn on <strong>Force from address</strong>.
+							Set the From email on the <strong>Sending</strong> tab to an address on that domain, and turn on <strong>Force from email</strong>.
 						</li>
 						<li><?php echo $has_webhook ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							In Mailgun, go to <strong>Send &rarr; Webhooks</strong> &rarr; <strong>Add webhook</strong> &rarr; <strong>Domain-level</strong> (not Account-level), pick this site's domain, and subscribe it to <code>accepted</code>, <code>delivered</code>, <code>permanent_fail</code> and <code>opened</code>, pointing at:
@@ -1183,6 +1185,126 @@ class WPEL_Admin {
 	}
 
 	/**
+	 * Email Log bulk actions: delete the selected rows, or resend them. A
+	 * resend goes back through wp_mail(), so each one is logged (and tracked)
+	 * as a new row; the original row just gets a "resent" timeline entry.
+	 * Rows with no saved message (created straight from a webhook event) are
+	 * skipped, and attachments aren't stored so they can't be resent.
+	 */
+	public function handle_log_bulk() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wpel' ) );
+		}
+		check_admin_referer( 'wpel_log_bulk' );
+
+		global $wpdb;
+		$table  = WPEL_Mailgun_Monitor::table();
+		if ( ! empty( $_POST['row_action'] ) ) {
+			// A row's own Resend/Delete button ("resend:123"), which acts on
+			// just that row whatever else is ticked.
+			list( $action, $id ) = array_pad( explode( ':', sanitize_text_field( wp_unslash( $_POST['row_action'] ) ), 2 ), 2, 0 );
+			$action = sanitize_key( $action );
+			$ids    = array_filter( array( absint( $id ) ) );
+		} else {
+			$action = isset( $_POST['bulk_action'] ) ? sanitize_key( wp_unslash( $_POST['bulk_action'] ) ) : '';
+			$ids    = isset( $_POST['ids'] ) ? array_values( array_unique( array_filter( array_map( 'absint', (array) $_POST['ids'] ) ) ) ) : array();
+		}
+		$back   = wp_get_referer() ? wp_get_referer() : admin_url( 'admin.php?page=wpel-log' );
+		$back   = remove_query_arg( $this->removable_query_args( array() ), $back );
+
+		$done    = 0;
+		$skipped = 0;
+		$failed  = 0;
+
+		if ( $ids && 'delete' === $action ) {
+			// absint()'d above, so safe to inline.
+			$done = (int) $wpdb->query( "DELETE FROM {$table} WHERE id IN (" . implode( ',', $ids ) . ')' );
+		} elseif ( $ids && 'resend' === $action ) {
+			sort( $ids ); // oldest first, so the new rows keep the originals' order
+			$monitor = WPEL_Mailgun_Monitor::instance();
+			foreach ( $ids as $id ) {
+				$row = $wpdb->get_row( $wpdb->prepare( "SELECT recipient, subject, headers, body FROM {$table} WHERE id = %d", $id ) );
+				if ( ! $row || null === $row->body || '' === trim( (string) $row->recipient ) ) {
+					$skipped++;
+					continue;
+				}
+
+				$headers = json_decode( (string) $row->headers, true );
+				$headers = is_array( $headers ) ? array_values( $headers ) : array();
+				// Mail switched to HTML via the wp_mail_content_type filter never
+				// had a Content-Type header to log; without one it'd resend as
+				// plain text and show raw markup.
+				$has_type = false;
+				foreach ( $headers as $h ) {
+					if ( preg_match( '/^content-type:/i', (string) $h ) ) {
+						$has_type = true;
+						break;
+					}
+				}
+				if ( ! $has_type && $this->body_is_html( $row->body, $headers ) ) {
+					$headers[] = 'Content-Type: text/html; charset=UTF-8';
+				}
+
+				if ( wp_mail( $row->recipient, (string) $row->subject, (string) $row->body, $headers ) ) {
+					$done++;
+					$monitor->log_event( $id, 'resent' );
+				} else {
+					$failed++;
+					$monitor->log_event( $id, 'resend failed' );
+				}
+			}
+		}
+
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'wpel_bulk'    => $action,
+					'wpel_done'    => $done,
+					'wpel_skipped' => $skipped,
+					'wpel_failed'  => $failed,
+				),
+				$back
+			)
+		);
+		exit;
+	}
+
+	/** Strips the bulk-action result args from the URL once the notice has shown. */
+	public function removable_query_args( $args ) {
+		return array_merge( $args, array( 'wpel_bulk', 'wpel_done', 'wpel_skipped', 'wpel_failed' ) );
+	}
+
+	private function log_bulk_notice() {
+		if ( empty( $_GET['wpel_bulk'] ) ) {
+			return;
+		}
+		$action  = sanitize_key( wp_unslash( $_GET['wpel_bulk'] ) );
+		$done    = isset( $_GET['wpel_done'] ) ? absint( $_GET['wpel_done'] ) : 0;
+		$skipped = isset( $_GET['wpel_skipped'] ) ? absint( $_GET['wpel_skipped'] ) : 0;
+		$failed  = isset( $_GET['wpel_failed'] ) ? absint( $_GET['wpel_failed'] ) : 0;
+		$emails  = function ( $n ) {
+			return $n . ' ' . _n( 'email', 'emails', $n, 'wpel' );
+		};
+
+		if ( 'delete' === $action ) {
+			$message = 'Deleted ' . $emails( $done ) . '.';
+		} elseif ( 'resend' === $action ) {
+			$message = 'Resent ' . $emails( $done ) . ' — each appears as a new entry below.';
+			if ( $failed ) {
+				$message .= ' ' . $emails( $failed ) . ' failed to send; see the new entries for the error.';
+			}
+			if ( $skipped ) {
+				$message .= ' Skipped ' . $emails( $skipped ) . ' with no saved message to resend (entries created from Mailgun events only).';
+			}
+		} else {
+			return;
+		}
+
+		$class = ( $failed || ( ! $done && $skipped ) ) ? 'notice-warning' : 'notice-success';
+		echo '<div class="notice ' . esc_attr( $class ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
+	}
+
+	/**
 	 * Trusts an explicit Content-Type header when the sender passed one.
 	 * Otherwise sniffs for common tags, since plugins often switch to HTML
 	 * via the wp_mail_content_type filter instead, which never shows up in
@@ -1232,6 +1354,7 @@ class WPEL_Admin {
 		?>
 		<div class="wrap">
 			<h1>Email Log</h1>
+			<?php $this->log_bulk_notice(); ?>
 			<ul class="subsubsub">
 				<li><a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>" <?php echo '' === $filter ? 'class="current"' : ''; ?>>All</a> |</li>
 				<?php foreach ( $allowed as $s ) : ?>
@@ -1247,17 +1370,35 @@ class WPEL_Admin {
 					</a>
 				</li>
 			</ul>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" id="wpel-log-form">
+			<input type="hidden" name="action" value="wpel_log_bulk">
+			<?php wp_nonce_field( 'wpel_log_bulk' ); ?>
+			<div class="tablenav top">
+				<div class="alignleft actions bulkactions">
+					<label for="wpel-bulk-action" class="screen-reader-text">Select bulk action</label>
+					<select name="bulk_action" id="wpel-bulk-action">
+						<option value="">Bulk actions</option>
+						<option value="resend">Resend</option>
+						<option value="delete">Delete</option>
+					</select>
+					<input type="submit" class="button action" value="Apply">
+				</div>
+				<br class="clear">
+			</div>
 			<table class="wp-list-table widefat fixed striped">
 				<thead>
 					<tr>
-						<th style="width:60px">ID</th>
+						<td id="cb" class="manage-column column-cb check-column">
+							<label class="screen-reader-text" for="cb-select-all-1">Select all</label>
+							<input id="cb-select-all-1" type="checkbox">
+						</td>
 						<th style="width:150px">When</th>
 						<th>Recipient</th>
 						<th>Subject</th>
 						<th style="width:100px">Status</th>
-						<th style="width:130px">Opens</th>
+						<th style="width:60px">Opens</th>
 						<th>Detail</th>
-						<th style="width:70px">Action</th>
+						<th style="width:190px">Actions</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -1276,7 +1417,10 @@ class WPEL_Admin {
 						$color = isset( $badge[ $r->status ] ) ? $badge[ $r->status ] : '#646970';
 						?>
 						<tr>
-							<td>#<?php echo (int) $r->id; ?></td>
+							<th scope="row" class="check-column">
+								<label class="screen-reader-text" for="cb-select-<?php echo (int) $r->id; ?>">Select email #<?php echo (int) $r->id; ?></label>
+								<input id="cb-select-<?php echo (int) $r->id; ?>" type="checkbox" name="ids[]" value="<?php echo (int) $r->id; ?>">
+							</th>
 							<td><?php echo esc_html( $r->created_at ); ?></td>
 							<td><?php echo esc_html( $r->recipient ); ?></td>
 							<td><?php echo esc_html( $r->subject ); ?></td>
@@ -1284,22 +1428,28 @@ class WPEL_Admin {
 							<td><?php
 							if ( $r->open_count > 0 ) {
 								printf(
-									'<span title="%1$s">%2$s&times; (first %3$s)</span>',
-									esc_attr( 'Last opened: ' . $r->last_opened_at ),
-									(int) $r->open_count,
-									esc_html( $r->first_opened_at )
+									'<span title="%1$s">%2$d</span>',
+									esc_attr( 'First opened: ' . $r->first_opened_at . "\nLast opened: " . $r->last_opened_at ),
+									(int) $r->open_count
 								);
 							} else {
 								echo '&mdash;';
 							}
 							?></td>
 							<td><?php echo esc_html( $r->error_message ? $r->error_message : '' ); ?></td>
-							<td><button type="button" class="button button-small" data-wpel-view="<?php echo (int) $r->id; ?>">View</button></td>
+							<td class="wpel-row-actions">
+								<button type="button" class="button button-small" data-wpel-view="<?php echo (int) $r->id; ?>">View</button>
+								<?php if ( null !== $r->body ) : // nothing to resend for rows created straight from a webhook event ?>
+									<button type="submit" class="button button-small" name="row_action" value="resend:<?php echo (int) $r->id; ?>">Resend</button>
+								<?php endif; ?>
+								<button type="submit" class="button button-small wpel-delete" name="row_action" value="delete:<?php echo (int) $r->id; ?>">Delete</button>
+							</td>
 						</tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
 			</table>
+			</form>
 			<?php
 			$pages = (int) ceil( $total / $per );
 			if ( $pages > 1 ) {
@@ -1359,8 +1509,51 @@ class WPEL_Admin {
 			.wpel-info-table pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 			.wpel-info-table ol { margin: 0 0 0 18px; }
 			.wpel-modal-footer { padding: 12px 16px; border-top: 1px solid #dcdcde; text-align: right; }
+			.wpel-row-actions .button { margin: 0 2px 2px 0; }
+			.wp-core-ui .wpel-row-actions .wpel-delete { color: #b32d2e; border-color: #b32d2e; }
+			.wp-core-ui .wpel-row-actions .wpel-delete:hover, .wp-core-ui .wpel-row-actions .wpel-delete:focus { color: #fff; background: #b32d2e; border-color: #b32d2e; }
 		</style>
 		<script>
+		( function () {
+			var form = document.getElementById( 'wpel-log-form' );
+			if ( ! form ) {
+				return;
+			}
+			form.addEventListener( 'submit', function ( e ) {
+				var rowButton = e.submitter && 'row_action' === e.submitter.name ? e.submitter : null;
+				var action, noun;
+
+				if ( rowButton ) {
+					// A row's own Resend/Delete button: acts on that row only.
+					action = rowButton.value.split( ':' )[0];
+					noun   = 'this email';
+				} else {
+					action = form.querySelector( '#wpel-bulk-action' ).value;
+					var checked = form.querySelectorAll( 'input[name="ids[]"]:checked' ).length;
+					var message = '';
+					if ( ! action ) {
+						message = 'Choose a bulk action first.';
+					} else if ( ! checked ) {
+						message = 'Select at least one email first.';
+					}
+					if ( message ) {
+						e.preventDefault();
+						window.alert( message );
+						return;
+					}
+					noun = checked + ' ' + ( 1 === checked ? 'email' : 'emails' );
+				}
+
+				var one      = !! rowButton;
+				var question = 'delete' === action
+					? 'Permanently delete ' + noun + ' from the log?'
+					: 'Resend ' + noun + ' to the original ' + ( one ? 'recipient? It goes' : 'recipients? Each goes' ) + ' out again as a new log entry. Attachments aren\'t saved, so they won\'t be included.';
+				if ( ! window.confirm( question ) ) {
+					e.preventDefault();
+				}
+			} );
+		} )();
+
 		( function () {
 			var modal = document.getElementById( 'wpel-entry-modal' );
 			if ( ! modal || 'function' !== typeof modal.showModal ) {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.9
+ * Version:     2.2.10
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -66,6 +66,11 @@
  * ALERTING
  *   - When SMS alerts are enabled in Settings, every failure is texted (via
  *     Twilio) to every configured phone number, independent of email — this is what survives a total email outage.
+ *   - Flood protection: failures with the same recipient + reason as one
+ *     alerted in the last hour are only counted; alert texts are capped at
+ *     10 an hour (filter: wpel_sms_max_per_hour); and webhook events for our
+ *     own alert emails are ignored, so a bouncing alert address can't feed
+ *     back into new alerts. See handle_failure() and apply_sms_limit().
  *     Recipients need nothing but a phone that can receive SMS: no app, no
  *     account, no signup.
  *   - Every failure also attempts an alert email to the configured address.
@@ -75,7 +80,7 @@
  *   - UNOPENED SWEEP (optional, opt-in via Settings, requires open tracking
  *     above): an hourly cron (wpel_check_unopened) flags any 'delivered' row
  *     that still has open_count = 0 past a configurable number of hours, and
- *     texts an alert once per row (see check_unopened() in
+ *     flags each row once, in one summary text per run (see check_unopened() in
  *     includes/class-wpel-monitor.php).
  *   - Slack support still exists in the code (notify_slack() in
  *     class-wpel-monitor.php) but every call site is currently commented out
@@ -112,7 +117,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.9' );
+define( 'WPEL_VERSION', '2.2.10' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );
@@ -134,6 +139,20 @@ function wpel_shared_credential( $constant, $legacy_key ) {
 	}
 	$o = get_option( WPEL_OPTION, array() );
 	return isset( $o[ $legacy_key ] ) ? trim( (string) $o[ $legacy_key ] ) : '';
+}
+
+/**
+ * Whether "Force from name" / "Force from email" is on. Both used to be one
+ * "Force from address" setting (force_from); sites that haven't saved
+ * Settings since the split keep whatever that was set to.
+ *
+ * @param array  $o     WPEL_OPTION array.
+ * @param string $which 'name' or 'email'.
+ * @return bool
+ */
+function wpel_force_from( $o, $which ) {
+	$key = 'force_from_' . $which;
+	return isset( $o[ $key ] ) ? ! empty( $o[ $key ] ) : ! empty( $o['force_from'] );
 }
 
 // GitHub repo the update checker reads releases/tags from.

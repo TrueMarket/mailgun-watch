@@ -16,8 +16,30 @@ class WPEL_Mailgun_Monitor {
 	/** Marker header we add to our own alert emails so we never log/alert on them (loop guard). */
 	const SKIP_HEADER = 'X-WPEL-Skip: 1';
 
+	/**
+	 * Mailgun user variable WPEL_Mailer attaches to our alert emails. Mailgun
+	 * sends it back in every webhook event for that message, so handle_webhook()
+	 * can tell our alerts apart (the SKIP_HEADER itself never reaches Mailgun).
+	 */
+	const ALERT_VARIABLE = 'wpel_alert';
+
+	/** Subject prefix of our failure alert emails, see handle_failure(). */
+	const ALERT_SUBJECT_PREFIX = '[Mailgun Watch] Send failure on ';
+
 	/** Option key holding recent-failure timestamps used for outage detection. */
 	const FAILWIN_OPTION = 'wpel_recent_failures';
+
+	/** Option key tracking recent failure alerts by recipient + reason, see claim_failure_group(). */
+	const GROUPS_OPTION = 'wpel_alert_groups';
+
+	/** Seconds after a failure alert during which identical failures aren't alerted again. */
+	const GROUP_WINDOW = 3600;
+
+	/** Option key tracking this hour's alert texts, see apply_sms_limit(). */
+	const SMS_LIMIT_OPTION = 'wpel_sms_limit';
+
+	/** Most alert texts sent per hour (filterable: wpel_sms_max_per_hour). */
+	const SMS_MAX_PER_HOUR = 10;
 
 	/**
 	 * Row id created in the wp_mail filter, consumed by WPEL_Mailer's pre_wp_mail
@@ -351,6 +373,15 @@ class WPEL_Mailgun_Monitor {
 		$severity   = isset( $event['severity'] ) ? $event['severity'] : '';
 		$reason     = isset( $event['delivery-status']['message'] ) ? $event['delivery-status']['message'] : ( isset( $event['reason'] ) ? $event['reason'] : '' );
 
+		// Events for our own alert emails. These are never logged at send time,
+		// so a failure here would match no row, get logged as a new one and
+		// raise another alert email — which, if the alert address is bouncing,
+		// fails too, endlessly. The subject check covers alerts sent before the
+		// ALERT_VARIABLE tag existed.
+		if ( ! empty( $event['user-variables'][ self::ALERT_VARIABLE ] ) || 0 === strpos( $subject, self::ALERT_SUBJECT_PREFIX ) ) {
+			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'alert email' ), 200 );
+		}
+
 		// UPSERT resolution: message id (stamped at send time) -> recent unlinked
 		// row by recipient+subject (covers the case where send_after didn't fire) ->
 		// create a fresh row from the webhook payload. Shared by every event type,
@@ -498,6 +529,19 @@ class WPEL_Mailgun_Monitor {
 
 		$outage = $this->record_failure(); // true when threshold crossed
 
+		// A failure just like one alerted on in the last hour (same recipient and
+		// reason, e.g. every Wordfence email to an address Mailgun won't deliver
+		// to) is only counted, and mentioned in the next alert for it. It still
+		// counts toward outage detection above.
+		$held = $this->claim_failure_group( $recipient, $reason );
+		if ( null === $held ) {
+			if ( $outage ) {
+				$this->notify_outage_alarm();
+			}
+			return;
+		}
+		$repeats = $held ? sprintf( "%d more like this since the last alert.\n", $held ) : '';
+
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
 
 		// 1) Slack — disabled for now (SMS via Twilio below covers this channel instead).
@@ -517,12 +561,13 @@ class WPEL_Mailgun_Monitor {
 		// 1b) SMS via Twilio — same trigger, independent channel, survives an email outage.
 		$this->notify_twilio(
 			sprintf(
-				"%s - email send failed\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%s",
+				"%s - email send failed\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%sRepeats in the next hour won't be texted.\n%s",
 				$host,
 				$recipient,
 				$subject,
 				$reason,
 				$source,
+				$repeats,
 				admin_url( 'admin.php?page=wpel-log' )
 			)
 		);
@@ -535,17 +580,57 @@ class WPEL_Mailgun_Monitor {
 
 		// 3) Best-effort alert email (may itself fail if email is down; SMS has it covered).
 		$this->notify_email(
-			'[Mailgun Watch] Send failure on ' . wp_parse_url( home_url(), PHP_URL_HOST ),
+			self::ALERT_SUBJECT_PREFIX . $host,
 			sprintf(
-				"A message failed to send.\n\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\nLog row: %s\n\nReview: %s",
+				"A message failed to send.\n\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\nLog row: %s\n\n%sFailures with the same recipient and reason over the next hour won't be alerted separately; they're all in the Email Log.\n\nReview: %s",
 				$recipient,
 				$subject,
 				$reason,
 				$source,
 				$row_id ? '#' . $row_id : 'n/a',
+				$repeats ? $repeats . "\n" : '',
 				admin_url( 'admin.php?page=wpel-log' )
 			)
 		);
+	}
+
+	/**
+	 * Groups repeat failures by recipient + reason. The first one alerts as
+	 * normal; identical ones within GROUP_WINDOW after it are only counted.
+	 *
+	 * @return int|null Null to stay quiet (already alerted within the window);
+	 *                  otherwise how many identical failures were held back
+	 *                  since this group's previous alert, for the new alert to mention.
+	 */
+	private function claim_failure_group( $recipient, $reason ) {
+		$key    = md5( strtolower( trim( (string) $recipient ) ) . '|' . trim( (string) $reason ) );
+		$now    = time();
+		$groups = get_option( self::GROUPS_OPTION, array() );
+		if ( ! is_array( $groups ) ) {
+			$groups = array();
+		}
+
+		$held = 0;
+		if ( isset( $groups[ $key ] ) ) {
+			if ( $now - (int) $groups[ $key ]['t'] < self::GROUP_WINDOW ) {
+				$groups[ $key ]['held'] = (int) $groups[ $key ]['held'] + 1;
+				update_option( self::GROUPS_OPTION, $groups, false );
+				return null;
+			}
+			$held = (int) $groups[ $key ]['held'];
+		}
+
+		// Forget groups that have been quiet for a day, so the option stays small.
+		$groups = array_filter(
+			$groups,
+			function ( $g ) use ( $now ) {
+				return is_array( $g ) && $now - (int) $g['t'] < DAY_IN_SECONDS;
+			}
+		);
+		$groups[ $key ] = array( 't' => $now, 'held' => 0 );
+		update_option( self::GROUPS_OPTION, $groups, false );
+
+		return $held;
 	}
 
 	private function notify_email( $subject, $body ) {
@@ -599,7 +684,8 @@ class WPEL_Mailgun_Monitor {
 				$host,
 				$window,
 				admin_url( 'admin.php?page=wpel-log' )
-			)
+			),
+			true // already throttled above, and it's the one text that must get through
 		);
 	}
 
@@ -664,8 +750,9 @@ class WPEL_Mailgun_Monitor {
 	 * no account, no subscribing to anything.
 	 *
 	 * @param string $body
+	 * @param bool   $bypass_limit Send even past the hourly limit (still counted).
 	 */
-	private function notify_twilio( $body ) {
+	private function notify_twilio( $body, $bypass_limit = false ) {
 		if ( ! $this->sms_enabled() ) {
 			return;
 		}
@@ -675,6 +762,12 @@ class WPEL_Mailgun_Monitor {
 		}
 		$to_numbers = array_filter( array_map( 'trim', explode( ',', $this->opt( 'twilio_to_numbers', '' ) ) ) );
 		if ( ! $to_numbers ) {
+			return;
+		}
+
+		// Trimmed before the limit notes are added, so they can't be cut off.
+		$body = $this->apply_sms_limit( mb_substr( $body, 0, 1300 ), $bypass_limit );
+		if ( null === $body ) {
 			return;
 		}
 
@@ -690,11 +783,60 @@ class WPEL_Mailgun_Monitor {
 					'body'     => array(
 						'To'   => $to,
 						'From' => $creds['from_number'],
-						'Body' => mb_substr( $body, 0, 1500 ), // Twilio auto-segments/concatenates up to ~1600 chars
+						'Body' => $body, // under ~1600 chars (trimmed above), which Twilio auto-segments/concatenates
 					),
 				)
 			);
 		}
+	}
+
+	/**
+	 * Hard cap on alert texts per hour, whatever is triggering them — the
+	 * backstop if some new failure pattern slips past the grouping in
+	 * handle_failure(). The text that reaches the cap says so; the first one
+	 * after the hour is up says how many were held back. Counted once per
+	 * alert, however many numbers it goes to.
+	 *
+	 * @param string $body
+	 * @param bool   $bypass Send regardless of the cap (it still counts toward it).
+	 * @return string|null The body to send, with any notes added, or null to stay quiet.
+	 */
+	private function apply_sms_limit( $body, $bypass ) {
+		$max = (int) apply_filters( 'wpel_sms_max_per_hour', self::SMS_MAX_PER_HOUR );
+		if ( $max <= 0 ) {
+			return $body; // limit switched off via the filter
+		}
+
+		$now   = time();
+		$state = get_option( self::SMS_LIMIT_OPTION, array() );
+		if ( ! is_array( $state ) || empty( $state['start'] ) || $now - (int) $state['start'] >= HOUR_IN_SECONDS ) {
+			if ( is_array( $state ) && ! empty( $state['held'] ) ) {
+				$body = sprintf(
+					"(%d earlier %s not texted: SMS limit reached. See the Email Log.)\n",
+					(int) $state['held'],
+					1 === (int) $state['held'] ? 'alert was' : 'alerts were'
+				) . $body;
+			}
+			$state = array( 'start' => $now, 'sent' => 0, 'held' => 0 );
+		}
+
+		if ( ! $bypass && $state['sent'] >= $max ) {
+			$state['held']++;
+			update_option( self::SMS_LIMIT_OPTION, $state, false );
+			return null;
+		}
+
+		$state['sent']++;
+		if ( ! $bypass && $state['sent'] === $max ) {
+			$body .= sprintf(
+				"\nSMS limit reached (%d an hour): no more alert texts until %s.",
+				$max,
+				wp_date( get_option( 'time_format' ), $state['start'] + HOUR_IN_SECONDS )
+			);
+		}
+		update_option( self::SMS_LIMIT_OPTION, $state, false );
+
+		return $body;
 	}
 
 	/**
@@ -798,8 +940,9 @@ class WPEL_Mailgun_Monitor {
 	/**
 	 * Hourly cron (wpel_check_unopened): flags 'delivered' emails that have
 	 * sat with open_count = 0 past the configured threshold. Each row is
-	 * alerted at most once (unopened_alerted flag), so this is safe to run
-	 * as often as we like without spamming the same email repeatedly.
+	 * alerted at most once (unopened_alerted flag), and each run sends a
+	 * single text however many rows it flags, so a busy site can't turn one
+	 * run into a flood of texts.
 	 */
 	public function check_unopened() {
 		if ( ! (int) $this->opt( 'alert_unopened', 0 ) ) {
@@ -809,7 +952,7 @@ class WPEL_Mailgun_Monitor {
 
 		global $wpdb;
 		$table  = self::table();
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - $hours * HOUR_IN_SECONDS );
+		$cutoff = $this->local_mysql_time( time() - $hours * HOUR_IN_SECONDS );
 
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
@@ -820,40 +963,64 @@ class WPEL_Mailgun_Monitor {
 			)
 		);
 
+		if ( ! $rows ) {
+			return;
+		}
 		foreach ( $rows as $row ) {
 			// Mark first so a slow/failed notify can't cause the next run to re-alert the same row.
 			$this->update_row( $row->id, array( 'unopened_alerted' => 1 ), 'unopened_alert' );
-			$this->notify_unopened( $row, $hours );
 		}
+		$this->notify_unopened( $rows, $hours );
 	}
 
-	private function notify_unopened( $row, $hours ) {
+	/**
+	 * One text for everything a check_unopened() run flagged: the full
+	 * details for a single email, otherwise a short list.
+	 *
+	 * @param object[] $rows
+	 * @param int      $hours
+	 */
+	private function notify_unopened( $rows, $hours ) {
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
+		$link = admin_url( 'admin.php?page=wpel-log&status=delivered' );
 
-		// Slack — disabled for now, see notify_slack() and the note in handle_failure().
-		// $this->notify_slack(
-		// 	sprintf(
-		// 		"*Email unopened %dh after delivery on %s*\n• To: %s\n• Subject: %s\n• Delivered: %s\n• Log row: #%d",
-		// 		$hours,
-		// 		$host,
-		// 		$row->recipient,
-		// 		$row->subject,
-		// 		$row->created_at,
-		// 		$row->id
-		// 	)
-		// );
-
-		$this->notify_twilio(
-			sprintf(
+		if ( 1 === count( $rows ) ) {
+			$row  = $rows[0];
+			$text = sprintf(
 				"%s - unopened after %dh\nTo: %s\nSubject: %s\nDelivered: %s\n%s",
 				$host,
 				$hours,
 				$row->recipient,
 				$row->subject,
 				$row->created_at,
-				admin_url( 'admin.php?page=wpel-log&status=delivered' )
-			)
-		);
+				$link
+			);
+		} else {
+			$shown = 5;
+			$text  = sprintf( "%s - %d emails unopened after %dh\n", $host, count( $rows ), $hours );
+			foreach ( array_slice( $rows, 0, $shown ) as $row ) {
+				$text .= sprintf( "- %s: %s\n", $row->recipient, $row->subject );
+			}
+			if ( count( $rows ) > $shown ) {
+				$text .= sprintf( "+%d more\n", count( $rows ) - $shown );
+			}
+			$text .= $link;
+		}
+
+		// Slack — disabled for now, see notify_slack() and the note in handle_failure().
+		// $this->notify_slack( $text );
+
+		$this->notify_twilio( $text );
+	}
+
+	/**
+	 * A Unix timestamp in the same form and timezone as the log's created_at
+	 * column, which is stored in site-local time (current_time( 'mysql' )).
+	 * Cutoffs compared against created_at must use this, not gmdate(), or
+	 * they're off by the site's UTC offset.
+	 */
+	private function local_mysql_time( $timestamp ) {
+		return wp_date( 'Y-m-d H:i:s', $timestamp );
 	}
 
 	/**
@@ -906,6 +1073,11 @@ class WPEL_Mailgun_Monitor {
 		);
 		$wpdb->insert( self::table(), $data );
 		return (int) $wpdb->insert_id;
+	}
+
+	/** Appends an entry to a row's timeline without changing anything else. */
+	public function log_event( $id, $event ) {
+		$this->update_row( $id, array(), $event );
 	}
 
 	private function update_row( $id, $fields, $event = '' ) {
@@ -989,7 +1161,7 @@ class WPEL_Mailgun_Monitor {
 		if ( '' === $recipient && '' === $subject ) {
 			return 0;
 		}
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - 30 * MINUTE_IN_SECONDS );
+		$cutoff = $this->local_mysql_time( time() - 30 * MINUTE_IN_SECONDS );
 		return (int) $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT id FROM " . self::table() . "
@@ -1019,7 +1191,7 @@ class WPEL_Mailgun_Monitor {
 		if ( $days <= 0 ) {
 			return;
 		}
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS );
+		$cutoff = $this->local_mysql_time( time() - $days * DAY_IN_SECONDS );
 		$wpdb->query( $wpdb->prepare( "DELETE FROM " . self::table() . " WHERE created_at < %s", $cutoff ) );
 	}
 }

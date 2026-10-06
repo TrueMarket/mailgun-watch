@@ -16,6 +16,8 @@ node_modules/
 .env
 .env.*
 
+*.zip
+
 # Note: vendor/ is intentionally NOT ignored.
 # The plugin-update-checker library is bundled with the plugin and must ship
 # inside the release.

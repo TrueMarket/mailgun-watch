@@ -38,7 +38,8 @@ class WPEL_Mailer {
 	private $domain;
 	private $from_email;
 	private $from_name;
-	private $force_from;
+	private $force_from_name;
+	private $force_from_email;
 	private $track_opens;
 
 	private $smtp_host;
@@ -62,8 +63,9 @@ class WPEL_Mailer {
 		$this->enabled    = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
 		$this->api_key    = isset( $o['api_key'] ) ? trim( $o['api_key'] ) : '';
 		$this->domain     = isset( $o['domain'] ) ? trim( $o['domain'] ) : '';
-		$this->force_from = ! empty( $o['force_from'] );
-		$this->track_opens = ! empty( $o['track_opens'] );
+		$this->force_from_name  = wpel_force_from( $o, 'name' );
+		$this->force_from_email = wpel_force_from( $o, 'email' );
+		$this->track_opens      = ! empty( $o['track_opens'] );
 
 		$this->smtp_host       = ! empty( $o['smtp_host'] ) ? trim( $o['smtp_host'] ) : 'smtp.mailgun.org';
 		$this->smtp_port       = ! empty( $o['smtp_port'] ) ? (int) $o['smtp_port'] : 587;
@@ -121,7 +123,7 @@ class WPEL_Mailer {
 	/**
 	 * phpmailer_init callback: points core's PHPMailer at Mailgun's SMTP server
 	 * whenever the API isn't handling the send. Picks the From exactly as the
-	 * API path does (see send_via_api()); when "Force from address" overrides a
+	 * API path does (see send_via_api()); when "Force from email" overrides a
 	 * From a plugin/theme set, that address is kept reachable as the Reply-To.
 	 *
 	 * @param PHPMailer\PHPMailer\PHPMailer $phpmailer
@@ -152,10 +154,13 @@ class WPEL_Mailer {
 		$original_name = $phpmailer->FromName;
 		$caller_set    = $original_from && strtolower( $original_from ) !== strtolower( $this->core_default_from() );
 
-		if ( $this->force_from || ! $caller_set ) {
-			$phpmailer->From     = $this->from_email;
+		if ( $this->force_from_name || ! $caller_set ) {
 			$phpmailer->FromName = $this->from_name;
-			$phpmailer->Sender   = $this->from_email;
+		}
+
+		if ( $this->force_from_email || ! $caller_set ) {
+			$phpmailer->From   = $this->from_email;
+			$phpmailer->Sender = $this->from_email;
 
 			if ( $caller_set
 				&& strtolower( $original_from ) !== strtolower( $this->from_email )
@@ -229,8 +234,8 @@ class WPEL_Mailer {
 	private function send_via_api( $to, $subject, $message, $headers, $attachments ) {
 		$parsed = $this->parse_headers( $headers );
 
-		$from_email = ( $this->force_from || empty( $parsed['from_email'] ) ) ? $this->from_email : $parsed['from_email'];
-		$from_name  = ( $this->force_from || empty( $parsed['from_name'] ) ) ? $this->from_name : $parsed['from_name'];
+		$from_email = ( $this->force_from_email || empty( $parsed['from_email'] ) ) ? $this->from_email : $parsed['from_email'];
+		$from_name  = ( $this->force_from_name || empty( $parsed['from_name'] ) ) ? $this->from_name : $parsed['from_name'];
 		$from       = $from_name ? "{$from_name} <{$from_email}>" : $from_email;
 
 		$fields = array(
@@ -253,13 +258,13 @@ class WPEL_Mailer {
 		}
 		if ( $parsed['reply_to'] ) {
 			$fields['h:Reply-To'] = $parsed['reply_to'];
-		} elseif ( $this->force_from
+		} elseif ( $this->force_from_email
 			&& $parsed['from_email']
 			&& strtolower( $parsed['from_email'] ) !== strtolower( $this->from_email )
 			&& strtolower( $parsed['from_email'] ) !== strtolower( $this->core_default_from() )
 		) {
 			// Same as configure_smtp(): a From a plugin/theme set that "Force
-			// from address" overrode stays reachable as the Reply-To.
+			// from email" overrode stays reachable as the Reply-To.
 			$fields['h:Reply-To'] = $parsed['from_name']
 				? '"' . addcslashes( $parsed['from_name'], '"\\' ) . '" <' . $parsed['from_email'] . '>'
 				: $parsed['from_email'];
@@ -268,6 +273,13 @@ class WPEL_Mailer {
 			// Mailgun only embeds the pixel in the HTML part; harmless to send on
 			// plain-text sends too since there's nothing for it to inject into.
 			$fields['o:tracking-opens'] = 'yes';
+		}
+		if ( $parsed['is_alert'] ) {
+			// Our own alert email: Mailgun echoes this back in every webhook
+			// event for it ('user-variables'), so handle_webhook() can drop
+			// them. Without it, a bouncing alert email would be logged as a new
+			// failure and raise another alert email, which bounces, and so on.
+			$fields[ 'v:' . WPEL_Mailgun_Monitor::ALERT_VARIABLE ] = '1';
 		}
 
 		$endpoint = self::API_BASE . '/' . rawurlencode( $this->domain ) . '/messages';
@@ -326,6 +338,7 @@ class WPEL_Mailer {
 			'reply_to'   => '',
 			'cc'         => '',
 			'bcc'        => '',
+			'is_alert'   => false,
 		);
 
 		if ( empty( $headers ) ) {
@@ -368,6 +381,9 @@ class WPEL_Mailer {
 					break;
 				case 'bcc':
 					$out['bcc'] = $out['bcc'] ? $out['bcc'] . ',' . $value : $value;
+					break;
+				case 'x-wpel-skip':
+					$out['is_alert'] = true;
 					break;
 			}
 		}

@@ -3,3 +3,6 @@
 # platform's native endings, so line-ending differences never show up as
 # changes again. Binary files are auto-detected and left untouched.
 * text=auto
+
+# Dev-only tools stay out of release archives (git archive / GitHub zips).
+/tools export-ignore
