@@ -35,6 +35,13 @@ Every send becomes a row with a status that moves through
 `pending → sent (accepted) → delivered`, or lands on `failed` / `temp-fail` / `complained`.
 View and filter them under **Mailgun Watch → Log**.
 
+Each row also records its **source**: what sent it, and the page the visitor was on (`includes/class-wpel-sources.php`). `wp_mail()` doesn't carry this itself, so it's worked out at send time:
+
+- **Forminator**: the form and the notification (e.g. *Contact Us — Admin Email*), via Forminator's own send hooks, and the page the form was submitted from. Notification-level detail needs Forminator 1.57+; older versions record just the form.
+- **Anything else**: the type of request, e.g. `ajax:<action>`, `admin-post:<action>`, `rest:<route>`, cron, WP-CLI, the admin, the login page, or a front-end page. For AJAX, REST and admin-post requests the page comes from the referer, since form submissions are usually posted somewhere other than the page the form is on.
+
+The log has a **Source** column and a source filter that works with the status tabs. Rows created only from Mailgun events, and rows logged before this was added, have no source.
+
 ## How it works
 
 This plugin **is** the Mailgun transport — it doesn't sit alongside another SMTP plugin, it replaces one. Three layers reconcile into one log:
@@ -75,7 +82,7 @@ The settings sidebar shows which one is active, and **Send test email** reports 
 - **At most 10 alert texts an hour**, whatever triggers them. The text that hits the limit says so, and the first one after the hour says how many weren't sent. Alert emails aren't capped. Change the limit with the `wpel_sms_max_per_hour` filter (`0` turns it off).
 - Webhook events for the plugin's **own alert emails are ignored** (they're tagged with a Mailgun variable when sent). Otherwise a bouncing alert address would turn each bounced alert into a new failure, a new alert, another bounce, and so on.
 - A burst of failures with no successful sends in the window → a distinct **"POSSIBLE TOTAL EMAIL OUTAGE"** text (throttled to one per window). This is the case where the alert email itself can't get out, which is exactly what SMS covers. It's sent even when the hourly text limit has been reached.
-- **Unopened emails:** the hourly check sends one text for everything it flags in that run (a list when there's more than one), and each email is flagged once.
+- **Unopened emails:** the hourly check sends one text for everything it flags in that run (a list when there's more than one), and each email is flagged once. **Unopened alerts cover** can limit it to selected sources: individual Forminator notifications (so you can watch a form's email to your team without the visitor's auto-reply), or any other source the log has seen, each optionally only from one page. The limit is applied when the check runs, so changing it also covers emails still waiting out the threshold. Ticking nothing means no unopened alerts.
 - Slack support (`notify_slack()` in `includes/class-wpel-monitor.php`) is still in the code but every call site is currently commented out in favor of Twilio SMS, and the Settings field is hidden (not removed — see `render_settings_page()`). Uncomment the calls (in `handle_failure()`, `notify_outage_alarm()`, and `notify_unopened()`) and un-hide the field to run Slack alongside SMS again — the saved webhook URL, if any, is untouched.
 
 Thresholds and retention are on the Settings page. Every logged email's message is saved and can be viewed from the Email Log (**View**), and is deleted with its log entry once the retention period passes. Tick entries in the Email Log to **Delete** them or **Resend** them via the Bulk actions menu; a resend goes out as a new log entry (without attachments, which aren't saved), and entries created only from Mailgun events have no message to resend.
@@ -122,7 +129,7 @@ To ship an update, paste this to Claude Code (fill in the changelog notes), or f
 Release a new version of this plugin. Bump the Version header and
 WPEL_VERSION in mailgun-email-monitor.php together (patch bump unless
 I say otherwise). Add a new entry at the top of the == Changelog ==
-section in readme.txt containing a concise list of all changes in the past tense.
+section in readme.txt containing a short and concise list of all changes in the past tense.
 
 Show me the list of changes before commiting.
 

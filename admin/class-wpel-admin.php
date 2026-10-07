@@ -97,6 +97,8 @@ class WPEL_Admin {
 		$out['outage_window']    = max( 1, (int) ( isset( $input['outage_window'] ) ? $input['outage_window'] : 15 ) );
 		$out['alert_unopened']   = ! empty( $input['alert_unopened'] ) ? 1 : 0;
 		$out['unopened_hours']   = max( 1, (int) ( isset( $input['unopened_hours'] ) ? $input['unopened_hours'] : 24 ) );
+		$out['unopened_scope']   = ( isset( $input['unopened_scope'] ) && 'selected' === $input['unopened_scope'] ) ? 'selected' : 'all';
+		$out['unopened_watch']   = $this->sanitize_unopened_watch( $input );
 
 		// A previously-passing webhook check or test send no longer proves
 		// anything once the API key or domain they were run against changes.
@@ -111,6 +113,29 @@ class WPEL_Admin {
 			);
 		}
 
+		return $out;
+	}
+
+	/**
+	 * The ticked sources for the unopened alert, as source => page id. Each
+	 * source takes its page from its group's picker (one per Forminator form,
+	 * shared by that form's notifications); see WPEL_Sources::group_key().
+	 * Kept while the scope is "all" (the fields still submit, just hidden),
+	 * so switching back doesn't lose the list.
+	 */
+	private function sanitize_unopened_watch( $input ) {
+		$sources = isset( $input['unopened_sources'] ) ? (array) $input['unopened_sources'] : array();
+		$pages   = isset( $input['unopened_page'] ) && is_array( $input['unopened_page'] ) ? $input['unopened_page'] : array();
+
+		$out = array();
+		foreach ( $sources as $source ) {
+			$source = WPEL_Sources::clean( wp_unslash( $source ) );
+			if ( '' === $source ) {
+				continue;
+			}
+			$group          = WPEL_Sources::group_key( $source );
+			$out[ $source ] = isset( $pages[ $group ] ) ? absint( $pages[ $group ] ) : 0;
+		}
 		return $out;
 	}
 
@@ -831,6 +856,10 @@ class WPEL_Admin {
 							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron; each email is only alerted once, and each check sends at most one text listing everything it found.</p></td>
 						</tr>
 						<tr>
+							<th scope="row">Unopened alerts cover</th>
+							<td><?php $this->render_unopened_watch( $o ); ?></td>
+						</tr>
+						<tr>
 							<th scope="row">Webhook endpoint</th>
 							<td><code id="wpel_webhook_url"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
 							<button type="button" class="button-link" data-wpel-copy="wpel_webhook_url" style="margin-left:8px;">Copy</button>
@@ -872,6 +901,10 @@ class WPEL_Admin {
 			.wpel-settings-sidebar { flex: 0 0 340px; width: 340px; }
 			.wpel-settings-sidebar .postbox ol { margin: 0 0 12px; }
 			.wpel-settings-sidebar .postbox li { margin-bottom: 12px; line-height: 1.5; }
+			#wpel-unopened-watch { margin-top: 12px; padding-left: 24px; }
+			#wpel-unopened-watch h4 { margin: 12px 0 6px; }
+			.wpel-watch-group { margin: 0 0 10px; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; }
+			.wpel-watch-group .wpel-watch-source, .wpel-watch-group .wpel-watch-page { display: block; margin-top: 6px; }
 			@media (max-width: 960px) {
 				.wpel-settings-columns { display: block; }
 				.wpel-settings-sidebar { width: auto; margin-top: 24px; }
@@ -922,6 +955,20 @@ class WPEL_Admin {
 			toggle.addEventListener( 'change', function () {
 				rows.forEach( function ( r ) {
 					r.style.display = toggle.checked ? '' : 'none';
+				} );
+			} );
+		} )();
+
+		( function () {
+			// "Unopened alerts cover" shows the source list only when limited to
+			// selected sources. Like the SMS rows, hidden fields still submit.
+			var list = document.getElementById( 'wpel-unopened-watch' );
+			if ( ! list ) {
+				return;
+			}
+			document.querySelectorAll( 'input[name$="[unopened_scope]"]' ).forEach( function ( radio ) {
+				radio.addEventListener( 'change', function () {
+					list.style.display = 'selected' === radio.value && radio.checked ? '' : 'none';
 				} );
 			} );
 		} )();
@@ -1026,6 +1073,119 @@ class WPEL_Admin {
 			$name = wp_parse_url( home_url(), PHP_URL_HOST );
 		}
 		return $name . ' - Mailgun Watch';
+	}
+
+	/**
+	 * "Unopened alerts cover" setting: every delivered email, or only the
+	 * ticked sources. Lists each Forminator form's notifications (so the
+	 * notification to the business can be watched without the visitor's
+	 * auto-reply), then any other source seen in the log. Each form, or
+	 * other source, gets an optional page picker.
+	 */
+	private function render_unopened_watch( $o ) {
+		$sources  = WPEL_Sources::instance();
+		$scope    = isset( $o['unopened_scope'] ) && 'selected' === $o['unopened_scope'] ? 'selected' : 'all';
+		$watch    = ! empty( $o['unopened_watch'] ) && is_array( $o['unopened_watch'] ) ? $o['unopened_watch'] : array();
+		$name     = esc_attr( WPEL_OPTION );
+		$rendered = array();
+
+		// Saved page per picker group.
+		$group_pages = array();
+		foreach ( $watch as $source => $page ) {
+			if ( $page ) {
+				$group_pages[ WPEL_Sources::group_key( $source ) ] = (int) $page;
+			}
+		}
+
+		$page_picker = function ( $group, $pages, $label ) use ( $name, $group_pages ) {
+			$current = isset( $group_pages[ $group ] ) ? $group_pages[ $group ] : 0;
+			if ( $current && ! isset( $pages[ $current ] ) ) {
+				$pages[ $current ] = WPEL_Sources::page_title( $current );
+			}
+			if ( ! $pages ) {
+				return;
+			}
+			?>
+			<label class="wpel-watch-page"><?php echo esc_html( $label ); ?>
+				<select name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_page][<?php echo esc_attr( $group ); ?>]">
+					<option value="0">any page</option>
+					<?php foreach ( $pages as $id => $title ) : ?>
+						<option value="<?php echo (int) $id; ?>" <?php selected( $current, $id ); ?>><?php echo esc_html( $title ); ?></option>
+					<?php endforeach; ?>
+				</select>
+			</label>
+			<?php
+		};
+
+		$checkbox = function ( $source, $label, $hint = '' ) use ( $name, $watch, &$rendered ) {
+			$rendered[ $source ] = true;
+			?>
+			<label class="wpel-watch-source">
+				<input type="checkbox" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_sources][]" value="<?php echo esc_attr( $source ); ?>" <?php checked( isset( $watch[ $source ] ) ); ?>>
+				<?php echo esc_html( $label ); ?>
+				<?php if ( '' !== $hint ) : ?>
+					<span class="description">&rarr; <?php echo esc_html( $hint ); ?></span>
+				<?php endif; ?>
+			</label>
+			<?php
+		};
+		?>
+		<fieldset>
+			<label><input type="radio" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_scope]" value="all" <?php checked( 'all', $scope ); ?>> All delivered emails</label><br>
+			<label><input type="radio" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_scope]" value="selected" <?php checked( 'selected', $scope ); ?>> Only emails from the sources ticked below</label>
+		</fieldset>
+
+		<div id="wpel-unopened-watch"<?php echo 'selected' === $scope ? '' : ' style="display:none"'; ?>>
+			<?php if ( $sources->has_forminator() ) : ?>
+				<h4>Forminator forms</h4>
+				<?php $forms = $sources->forminator_forms(); ?>
+				<?php if ( ! $forms ) : ?>
+					<p class="description">No Forminator forms yet.</p>
+				<?php endif; ?>
+				<?php foreach ( $forms as $form ) : ?>
+					<div class="wpel-watch-group">
+						<strong><?php echo esc_html( $form['name'] ); ?></strong> <span class="description">#<?php echo (int) $form['id']; ?></span>
+						<?php if ( ! $form['notifications'] ) : ?>
+							<p class="description">This form has no email notifications.</p>
+						<?php endif; ?>
+						<?php
+						foreach ( $form['notifications'] as $n ) {
+							$checkbox( $n['source'], $n['label'], $n['recipients'] );
+						}
+						if ( $form['notifications'] ) {
+							$page_picker( 'forminator:' . $form['id'], $sources->forminator_pages( $form['id'] ), 'Only when submitted on' );
+						}
+						?>
+					</div>
+				<?php endforeach; ?>
+			<?php endif; ?>
+
+			<?php
+			// Everything else the log has seen, plus anything still ticked that
+			// isn't listed above (a deleted form, or Forminator deactivated), so
+			// saving the page doesn't silently drop it.
+			$others = $sources->logged_sources();
+			foreach ( array_keys( $watch ) as $source ) {
+				if ( ! isset( $rendered[ $source ] ) && ! isset( $others[ $source ] ) ) {
+					$others[ $source ] = array();
+				}
+			}
+			?>
+			<?php if ( $others ) : ?>
+				<h4>Other sources seen in the log</h4>
+				<?php foreach ( $others as $source => $pages ) : ?>
+					<div class="wpel-watch-group">
+						<?php
+						$checkbox( $source, $sources->label( $source ) );
+						$page_picker( WPEL_Sources::group_key( $source ), $pages, 'Only from' );
+						?>
+					</div>
+				<?php endforeach; ?>
+			<?php endif; ?>
+
+			<p class="description">An email's source is recorded when it's sent, so a source only shows up under "Other sources" once it has sent something. Ticking nothing means no unopened alerts at all. To watch a form's emails to your team without the visitor's auto-reply, tick only the notification that goes to your team.</p>
+		</div>
+		<?php
 	}
 
 	/**
@@ -1168,9 +1328,12 @@ class WPEL_Admin {
 			array(
 				'id'              => (int) $row->id,
 				'created_at'      => $row->created_at,
+				'from'            => isset( $row->from_address ) ? (string) $row->from_address : '', // older rows predate the column
 				'recipient'       => (string) $row->recipient,
 				'subject'         => (string) $row->subject,
 				'status'          => $row->status,
+				'source'          => $row->source ? WPEL_Sources::instance()->label( $row->source ) : '',
+				'source_page'     => $row->source_page ? WPEL_Sources::page_title( $row->source_page ) : '',
 				'message_id'      => (string) $row->mailgun_message_id,
 				'error'           => (string) $row->error_message,
 				'open_count'      => (int) $row->open_count,
@@ -1331,45 +1494,66 @@ class WPEL_Admin {
 
 		$allowed = array( 'pending', 'sent', 'delivered', 'failed', 'temp-fail', 'complained' );
 		$filter  = isset( $_GET['status'] ) ? sanitize_text_field( wp_unslash( $_GET['status'] ) ) : '';
+		$source  = isset( $_GET['source'] ) ? WPEL_Sources::clean( wp_unslash( $_GET['source'] ) ) : '';
 		$paged   = max( 1, (int) ( $_GET['paged'] ?? 1 ) );
 		$per     = 50;
 		$offset  = ( $paged - 1 ) * $per;
+		$sources = WPEL_Sources::instance();
 
-		// 'opened' is a pseudo-status: a single exclusive tab like the others
-		// (not a combinable toggle), so every link in the row replaces the view
-		// wholesale instead of ANDing filters together.
-		if ( 'opened' === $filter ) {
-			$where = ' WHERE open_count > 0';
-		} elseif ( in_array( $filter, $allowed, true ) ) {
-			$where = $wpdb->prepare( ' WHERE status = %s', $filter );
-		} else {
-			$where = '';
+		// The source filter narrows every status tab (and their counts); the
+		// status tabs themselves stay exclusive. 'opened' is a pseudo-status:
+		// a single exclusive tab like the others (not a combinable toggle), so
+		// every link in the row replaces the status view wholesale.
+		$conditions = array();
+		if ( '' !== $source ) {
+			$conditions[] = $wpdb->prepare( 'source = %s', $source );
 		}
+		$by_source = $conditions ? ' WHERE ' . implode( ' AND ', $conditions ) : '';
+
+		if ( 'opened' === $filter ) {
+			$conditions[] = 'open_count > 0';
+		} elseif ( in_array( $filter, $allowed, true ) ) {
+			$conditions[] = $wpdb->prepare( 'status = %s', $filter );
+		}
+		$where = $conditions ? ' WHERE ' . implode( ' AND ', $conditions ) : '';
 
 		$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}{$where}" );
 		$rows  = $wpdb->get_results( "SELECT * FROM {$table}{$where} ORDER BY id DESC LIMIT {$per} OFFSET {$offset}" );
 
-		$counts       = $wpdb->get_results( "SELECT status, COUNT(*) c FROM {$table} GROUP BY status", OBJECT_K );
-		$opened_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table} WHERE open_count > 0" );
+		$counts       = $wpdb->get_results( "SELECT status, COUNT(*) c FROM {$table}{$by_source} GROUP BY status", OBJECT_K );
+		$opened_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" . ( $by_source ? $by_source . ' AND' : ' WHERE' ) . ' open_count > 0' );
+
+		$log_url = admin_url( 'admin.php?page=wpel-log' );
+		if ( '' !== $source ) {
+			$log_url = add_query_arg( 'source', rawurlencode( $source ), $log_url );
+		}
+		$logged_sources = $sources->all_logged_sources();
 		?>
 		<div class="wrap">
 			<h1>Email Log</h1>
 			<?php $this->log_bulk_notice(); ?>
 			<ul class="subsubsub">
-				<li><a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>" <?php echo '' === $filter ? 'class="current"' : ''; ?>>All</a> |</li>
+				<li><a href="<?php echo esc_url( $log_url ); ?>" <?php echo '' === $filter ? 'class="current"' : ''; ?>>All</a> |</li>
 				<?php foreach ( $allowed as $s ) : ?>
 					<li>
-						<a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log&status=' . $s ) ); ?>" <?php echo $filter === $s ? 'class="current"' : ''; ?>>
+						<a href="<?php echo esc_url( add_query_arg( 'status', $s, $log_url ) ); ?>" <?php echo $filter === $s ? 'class="current"' : ''; ?>>
 							<?php echo esc_html( ucfirst( $s ) ); ?> (<?php echo isset( $counts[ $s ] ) ? (int) $counts[ $s ]->c : 0; ?>)
 						</a> |
 					</li>
 				<?php endforeach; ?>
 				<li>
-					<a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log&status=opened' ) ); ?>" <?php echo 'opened' === $filter ? 'class="current"' : ''; ?>>
+					<a href="<?php echo esc_url( add_query_arg( 'status', 'opened', $log_url ) ); ?>" <?php echo 'opened' === $filter ? 'class="current"' : ''; ?>>
 						Opened (<?php echo (int) $opened_count; ?>)
 					</a>
 				</li>
 			</ul>
+			<?php // Its fields sit in the tablenav below via form="" — a real <form> can't nest inside the bulk-action form. ?>
+			<form id="wpel-log-filter" method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>">
+				<input type="hidden" name="page" value="wpel-log">
+				<?php if ( '' !== $filter ) : ?>
+					<input type="hidden" name="status" value="<?php echo esc_attr( $filter ); ?>">
+				<?php endif; ?>
+			</form>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" id="wpel-log-form">
 			<input type="hidden" name="action" value="wpel_log_bulk">
 			<?php wp_nonce_field( 'wpel_log_bulk' ); ?>
@@ -1382,6 +1566,19 @@ class WPEL_Admin {
 						<option value="delete">Delete</option>
 					</select>
 					<input type="submit" class="button action" value="Apply">
+				</div>
+				<div class="alignleft actions">
+					<label for="wpel-source-filter" class="screen-reader-text">Filter by source</label>
+					<select name="source" id="wpel-source-filter" form="wpel-log-filter">
+						<option value="">All sources</option>
+						<?php if ( '' !== $source && ! in_array( $source, $logged_sources, true ) ) : ?>
+							<option value="<?php echo esc_attr( $source ); ?>" selected><?php echo esc_html( $sources->label( $source ) ); ?></option>
+						<?php endif; ?>
+						<?php foreach ( $logged_sources as $s ) : ?>
+							<option value="<?php echo esc_attr( $s ); ?>" <?php selected( $source, $s ); ?>><?php echo esc_html( $sources->label( $s ) ); ?></option>
+						<?php endforeach; ?>
+					</select>
+					<button type="submit" class="button" form="wpel-log-filter">Filter</button>
 				</div>
 				<br class="clear">
 			</div>
@@ -1397,13 +1594,14 @@ class WPEL_Admin {
 						<th>Subject</th>
 						<th style="width:100px">Status</th>
 						<th style="width:60px">Opens</th>
+						<th>Source</th>
 						<th>Detail</th>
 						<th style="width:190px">Actions</th>
 					</tr>
 				</thead>
 				<tbody>
 				<?php if ( empty( $rows ) ) : ?>
-					<tr><td colspan="8">No entries.</td></tr>
+					<tr><td colspan="9">No entries.</td></tr>
 				<?php else : ?>
 					<?php foreach ( $rows as $r ) :
 						$badge = array(
@@ -1436,6 +1634,24 @@ class WPEL_Admin {
 								echo '&mdash;';
 							}
 							?></td>
+							<td><?php
+							if ( $r->source ) {
+								printf(
+									'<a href="%1$s" title="Show only emails from this source">%2$s</a>',
+									esc_url( add_query_arg( 'source', rawurlencode( $r->source ), admin_url( 'admin.php?page=wpel-log' ) ) ),
+									esc_html( $sources->label( $r->source ) )
+								);
+								if ( $r->source_page ) {
+									printf(
+										'<br><span class="description">on <a href="%1$s" target="_blank">%2$s</a></span>',
+										esc_url( get_permalink( $r->source_page ) ),
+										esc_html( WPEL_Sources::page_title( $r->source_page ) )
+									);
+								}
+							} else {
+								echo '&mdash;';
+							}
+							?></td>
 							<td><?php echo esc_html( $r->error_message ? $r->error_message : '' ); ?></td>
 							<td class="wpel-row-actions">
 								<button type="button" class="button button-small" data-wpel-view="<?php echo (int) $r->id; ?>">View</button>
@@ -1453,7 +1669,7 @@ class WPEL_Admin {
 			<?php
 			$pages = (int) ceil( $total / $per );
 			if ( $pages > 1 ) {
-				$base = admin_url( 'admin.php?page=wpel-log' . ( $filter ? '&status=' . $filter : '' ) . '&paged=%#%' );
+				$base = add_query_arg( 'paged', '%#%', $filter ? add_query_arg( 'status', $filter, $log_url ) : $log_url );
 				echo '<div class="tablenav"><div class="tablenav-pages">';
 				echo wp_kses_post(
 					paginate_links(
@@ -1617,9 +1833,11 @@ class WPEL_Admin {
 				var tbody = table.createTBody();
 
 				addRow( tbody, 'Logged', d.created_at );
+				addRow( tbody, 'From', d.from );
 				addRow( tbody, 'To', d.recipient );
 				addRow( tbody, 'Subject', d.subject );
 				addRow( tbody, 'Status', d.status );
+				addRow( tbody, 'Source', d.source + ( d.source_page ? ' (on ' + d.source_page + ')' : '' ) );
 				addRow( tbody, 'Error / detail', d.error );
 				addRow( tbody, 'Mailgun message ID', d.message_id );
 				addRow( tbody, 'Opens', d.open_count > 0

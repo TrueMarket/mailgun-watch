@@ -2,7 +2,7 @@
 Contributors: jimlaroche
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Stable tag: 2.2.10
+Stable tag: 2.2.11
 
 Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, reconciles delivery via Mailgun webhooks, and alerts on failure.
 
@@ -11,6 +11,10 @@ Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, re
 Mailgun Watch replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
 
 == Changelog ==
+
+= 2.2.11 =
+* Added an "Unopened alerts cover" setting that could limit unopened-email alerts to selected sources, such as one Forminator notification, each optionally limited to one page; it was applied when the check ran, so changes also covered emails still waiting out the threshold
+* Recorded the From address each email actually went out with (API, SMTP fallback or Mailgun event) and showed it, along with the source, in the Email Log's View modal
 
 = 2.2.10 =
 * Split Force from address into separate Force from name and Force from email settings, each shown under its own field, with existing sites keeping their previous value for both

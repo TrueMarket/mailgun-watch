@@ -27,6 +27,7 @@ class WPEL_Activator {
 				id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 				created_at DATETIME NOT NULL,
 				updated_at DATETIME NOT NULL,
+				from_address VARCHAR(255) NULL,
 				recipient TEXT NULL,
 				subject TEXT NULL,
 				headers LONGTEXT NULL,
@@ -39,11 +40,14 @@ class WPEL_Activator {
 				first_opened_at DATETIME NULL,
 				last_opened_at DATETIME NULL,
 				unopened_alerted TINYINT UNSIGNED NOT NULL DEFAULT 0,
+				source VARCHAR(191) NULL,
+				source_page BIGINT UNSIGNED NOT NULL DEFAULT 0,
 				PRIMARY KEY (id),
 				KEY status (status),
 				KEY created_at (created_at),
 				KEY mailgun_message_id (mailgun_message_id),
-				KEY unopened_check (status, unopened_alerted, created_at)
+				KEY unopened_check (status, unopened_alerted, created_at),
+				KEY source (source)
 			) {$charset};"
 		);
 	}
@@ -114,6 +118,10 @@ class WPEL_Activator {
 			'outage_window'    => 15, // minutes
 			'alert_unopened'   => 0,
 			'unopened_hours'   => 24,
+			// 'all' delivered emails, or only the 'selected' sources in
+			// unopened_watch (source => page id, 0 = any page); see WPEL_Sources.
+			'unopened_scope'   => 'all',
+			'unopened_watch'   => array(),
 		);
 		$existing = get_option( WPEL_OPTION, array() );
 		if ( is_array( $existing ) && isset( $existing['force_from'] ) ) {

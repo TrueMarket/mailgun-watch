@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.10
+ * Version:     2.2.11
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -81,7 +81,9 @@
  *     above): an hourly cron (wpel_check_unopened) flags any 'delivered' row
  *     that still has open_count = 0 past a configurable number of hours, and
  *     flags each row once, in one summary text per run (see check_unopened() in
- *     includes/class-wpel-monitor.php).
+ *     includes/class-wpel-monitor.php). It can be limited to chosen sources,
+ *     e.g. one Forminator form's admin notification, optionally only from one
+ *     page: every row records what sent it (see includes/class-wpel-sources.php).
  *   - Slack support still exists in the code (notify_slack() in
  *     class-wpel-monitor.php) but every call site is currently commented out
  *     in favor of Twilio SMS. Uncomment them to re-enable it alongside SMS.
@@ -109,6 +111,7 @@
  *   includes/class-wpel-activator.php  Activation/deactivation + schema.
  *   includes/class-wpel-mailer.php     Mailgun API transport, plus the shared Mailgun SMTP fallback.
  *   includes/class-wpel-monitor.php    Capture, webhook reconcile, alerting, log table access.
+ *   includes/class-wpel-sources.php    Which form/page/request sent each email.
  *   admin/class-wpel-admin.php         Settings page + email log page.
  * ------------------------------------------------------------------------
  */
@@ -117,7 +120,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.10' );
+define( 'WPEL_VERSION', '2.2.11' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );
@@ -161,6 +164,7 @@ define( 'WPEL_GITHUB_REPO', 'https://github.com/TrueMarket/mailgun-watch/' );
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-activator.php';
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-monitor.php';
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-mailer.php';
+require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-sources.php';
 
 register_activation_hook( __FILE__, array( 'WPEL_Activator', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'WPEL_Activator', 'deactivate' ) );
@@ -211,6 +215,7 @@ add_action( 'plugins_loaded', array( 'WPEL_Activator', 'maybe_upgrade' ), 5 );
 add_action( 'plugins_loaded', 'wpel_boot' );
 
 function wpel_boot() {
+	WPEL_Sources::instance();
 	WPEL_Mailgun_Monitor::instance();
 	WPEL_Mailer::instance();
 

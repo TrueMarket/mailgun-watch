@@ -78,6 +78,8 @@ class WPEL_Mailgun_Monitor {
 		add_filter( 'wp_mail', array( $this, 'capture_outgoing' ), 99 );
 		add_action( 'wp_mail_succeeded', array( $this, 'on_local_success' ), 10, 1 );
 		add_action( 'wp_mail_failed', array( $this, 'on_local_failure' ), 10, 1 );
+		// Last, so it sees the From that WPEL_Mailer::configure_smtp() settled on.
+		add_action( 'phpmailer_init', array( $this, 'capture_phpmailer_from' ), PHP_INT_MAX );
 
 		// Webhook endpoint.
 		add_action( 'rest_api_init', array( $this, 'register_routes' ) );
@@ -143,13 +145,17 @@ class WPEL_Mailgun_Monitor {
 			$to = implode( ', ', $to );
 		}
 
+		$source = WPEL_Sources::instance()->current();
+
 		$this->last_row_id = $this->insert_row(
 			array(
-				'recipient' => $to,
-				'subject'   => isset( $args['subject'] ) ? $args['subject'] : '',
-				'headers'   => wp_json_encode( $headers ),
-				'body'      => isset( $args['message'] ) ? $args['message'] : '',
-				'status'    => 'pending',
+				'recipient'   => $to,
+				'subject'     => isset( $args['subject'] ) ? $args['subject'] : '',
+				'headers'     => wp_json_encode( $headers ),
+				'body'        => isset( $args['message'] ) ? $args['message'] : '',
+				'status'      => 'pending',
+				'source'      => $source['source'],
+				'source_page' => $source['page'],
 			)
 		);
 
@@ -169,6 +175,40 @@ class WPEL_Mailgun_Monitor {
 		$this->last_row_id  = 0;
 		$this->last_is_skip = false;
 		return $row_id;
+	}
+
+	/**
+	 * Stamps the From address a message actually went out with, which can
+	 * differ from the caller's From header when "Force from" is on. A query of
+	 * its own, so a site whose table hasn't gained the column yet only loses
+	 * this, not the status update alongside it.
+	 *
+	 * @param int    $row_id
+	 * @param string $from "Name <email>" or a bare address.
+	 */
+	public function record_sender( $row_id, $from ) {
+		global $wpdb;
+		if ( ! $row_id || '' === (string) $from ) {
+			return;
+		}
+		$wpdb->update( self::table(), array( 'from_address' => (string) $from ), array( 'id' => $row_id ) );
+	}
+
+	/**
+	 * phpmailer_init callback: records the From of a send going out through
+	 * PHPMailer (SMTP fallback or WordPress's default transport). The row id
+	 * is only peeked at here; on_local_success / on_local_failure consume it.
+	 *
+	 * @param PHPMailer\PHPMailer\PHPMailer $phpmailer
+	 */
+	public function capture_phpmailer_from( $phpmailer ) {
+		if ( $this->last_is_skip || ! $this->last_row_id ) {
+			return;
+		}
+		$this->record_sender(
+			$this->last_row_id,
+			$phpmailer->FromName ? "{$phpmailer->FromName} <{$phpmailer->From}>" : $phpmailer->From
+		);
 	}
 
 	/**
@@ -446,6 +486,9 @@ class WPEL_Mailgun_Monitor {
 			$fields['recipient'] = $recipient;
 			$fields['subject']   = $subject;
 			$row_id              = $this->insert_row( $fields, $type );
+			if ( ! empty( $event['message']['headers']['from'] ) ) {
+				$this->record_sender( $row_id, $event['message']['headers']['from'] );
+			}
 		}
 
 		if ( $is_failure ) {
@@ -943,6 +986,11 @@ class WPEL_Mailgun_Monitor {
 	 * alerted at most once (unopened_alerted flag), and each run sends a
 	 * single text however many rows it flags, so a busy site can't turn one
 	 * run into a flood of texts.
+	 *
+	 * When limited to selected sources (WPEL_Sources::watched()), only rows
+	 * from those sources count. The filter is applied here rather than at
+	 * send time, so a change to the list also covers emails still waiting
+	 * out the threshold. Rows that don't match are left unflagged.
 	 */
 	public function check_unopened() {
 		if ( ! (int) $this->opt( 'alert_unopened', 0 ) ) {
@@ -954,13 +1002,28 @@ class WPEL_Mailgun_Monitor {
 		$table  = self::table();
 		$cutoff = $this->local_mysql_time( time() - $hours * HOUR_IN_SECONDS );
 
+		$scope = '';
+		$watch = WPEL_Sources::watched();
+		if ( null !== $watch ) {
+			if ( ! $watch ) {
+				return; // limited to selected sources, but none are selected
+			}
+			$clauses = array();
+			foreach ( $watch as $source => $page ) {
+				$clauses[] = $page
+					? $wpdb->prepare( '( source = %s AND source_page = %d )', $source, $page )
+					: $wpdb->prepare( 'source = %s', $source );
+			}
+			$scope = ' AND ( ' . implode( ' OR ', $clauses ) . ' )';
+		}
+
+		// $scope is already prepared, so it's appended rather than run through prepare() again.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT id, recipient, subject, created_at FROM {$table}
-				 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = 0 AND created_at <= %s
-				 ORDER BY id ASC LIMIT 200",
+				"SELECT id, recipient, subject, created_at, source, source_page FROM {$table}
+				 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = 0 AND created_at <= %s",
 				$cutoff
-			)
+			) . $scope . ' ORDER BY id ASC LIMIT 200'
 		);
 
 		if ( ! $rows ) {
@@ -986,12 +1049,21 @@ class WPEL_Mailgun_Monitor {
 
 		if ( 1 === count( $rows ) ) {
 			$row  = $rows[0];
+			$from = '';
+			if ( $row->source ) {
+				$from = 'From: ' . WPEL_Sources::instance()->label( $row->source );
+				if ( $row->source_page ) {
+					$from .= ' on ' . WPEL_Sources::page_title( $row->source_page );
+				}
+				$from .= "\n";
+			}
 			$text = sprintf(
-				"%s - unopened after %dh\nTo: %s\nSubject: %s\nDelivered: %s\n%s",
+				"%s - unopened after %dh\nTo: %s\nSubject: %s\n%sDelivered: %s\n%s",
 				$host,
 				$hours,
 				$row->recipient,
 				$row->subject,
+				$from,
 				$row->created_at,
 				$link
 			);

@@ -216,6 +216,7 @@ class WPEL_Mailer {
 			return $result['ok']; // our own alert email (SKIP_HEADER) — no logging/alerting
 		}
 
+		$monitor->record_sender( $row_id, $result['from'] );
 		if ( $result['ok'] ) {
 			$monitor->mark_sent( $row_id, $result['message_id'] );
 		} else {
@@ -229,7 +230,7 @@ class WPEL_Mailer {
 	/**
 	 * Builds and sends the Mailgun API request.
 	 *
-	 * @return array { ok: bool, message_id: string, error: string }
+	 * @return array { ok: bool, message_id: string, error: string, from: string }
 	 */
 	private function send_via_api( $to, $subject, $message, $headers, $attachments ) {
 		$parsed = $this->parse_headers( $headers );
@@ -307,7 +308,7 @@ class WPEL_Mailer {
 		$response = wp_remote_post( $endpoint, $args );
 
 		if ( is_wp_error( $response ) ) {
-			return array( 'ok' => false, 'message_id' => '', 'error' => $response->get_error_message() );
+			return array( 'ok' => false, 'message_id' => '', 'error' => $response->get_error_message(), 'from' => $from );
 		}
 
 		$code = (int) wp_remote_retrieve_response_code( $response );
@@ -315,14 +316,14 @@ class WPEL_Mailer {
 
 		if ( $code >= 200 && $code < 300 ) {
 			$id = ( is_array( $json ) && ! empty( $json['id'] ) ) ? (string) $json['id'] : '';
-			return array( 'ok' => true, 'message_id' => $id, 'error' => '' );
+			return array( 'ok' => true, 'message_id' => $id, 'error' => '', 'from' => $from );
 		}
 
 		$error = ( is_array( $json ) && ! empty( $json['message'] ) )
 			? (string) $json['message']
 			: 'Mailgun API error (HTTP ' . $code . ')';
 
-		return array( 'ok' => false, 'message_id' => '', 'error' => $error );
+		return array( 'ok' => false, 'message_id' => '', 'error' => $error, 'from' => $from );
 	}
 
 	/**
