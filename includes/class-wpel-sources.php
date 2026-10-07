@@ -8,13 +8,15 @@
  *
  *   source       what sent it, e.g.
  *                  forminator:123:notification-1234-4567  one notification of a Forminator form
+ *                  html-forms:45:email-1                  the 1st "Send Email" action of an HTML Forms form
  *                  ajax:my_action / admin-post:my_action  an AJAX / admin-post.php handler
  *                  rest:/contact-form-7/v1/...            a REST route
  *                  cron, cli, admin, wp-login, front      anything else, by request type
  *   source_page  the post/page the visitor was on (0 if none or unknown)
  *
- * Form plugins are recognized through their own send hooks, which say
- * exactly which form (and, for Forminator, which notification) is sending.
+ * Form plugins (Forminator, HTML Forms) are recognized through their own
+ * send hooks, which say exactly which form, and which of its emails, is
+ * sending.
  * Everything else falls back to the request type, with the page taken from
  * the referer for AJAX/REST/admin-post requests, since form submissions are
  * usually posted somewhere other than the page the form is on.
@@ -37,7 +39,7 @@ class WPEL_Sources {
 	 */
 	private $context = null;
 
-	/** @var array Form models by id, for label lookups. */
+	/** @var array Form plugin models by group key (e.g. 'forminator:83'), for label lookups. */
 	private $forms = array();
 
 	public static function instance() {
@@ -54,7 +56,18 @@ class WPEL_Sources {
 		// (6th argument, Forminator 1.57+).
 		add_action( 'forminator_custom_form_mail_before_send_mail', array( $this, 'forminator_begin' ), 10, 3 );
 		add_filter( 'forminator_custom_form_mail_admin_message', array( $this, 'forminator_notification' ), PHP_INT_MAX, 6 );
-		add_action( 'forminator_custom_form_mail_after_send_mail', array( $this, 'forminator_end' ) );
+		add_action( 'forminator_custom_form_mail_after_send_mail', array( $this, 'form_end' ) );
+
+		// HTML Forms. hf_process_form runs once per submission before any of
+		// the form's actions; each "Send Email" action then runs on
+		// hf_process_form_action_email. Those actions have no id, so they're
+		// numbered by position (email-1, email-2, ...) — the same order the
+		// settings page lists them in. Any other action that sends mail is
+		// recorded at the form level.
+		add_action( 'hf_process_form', array( $this, 'html_forms_begin' ), 1, 2 );
+		add_action( 'hf_process_form_action_email', array( $this, 'html_forms_email' ), 1 );
+		add_action( 'hf_process_form_action_email', array( $this, 'html_forms_email_done' ), PHP_INT_MAX );
+		add_action( 'hf_form_success', array( $this, 'form_end' ), PHP_INT_MAX );
 	}
 
 	/* -------------------------------------------------------------------- */
@@ -142,7 +155,34 @@ class WPEL_Sources {
 		return $message;
 	}
 
-	public function forminator_end() {
+	/** @param HTML_Forms\Form $form @param HTML_Forms\Submission $submission */
+	public function html_forms_begin( $form, $submission ) {
+		$form_key = 'html-forms:' . (int) ( isset( $form->ID ) ? $form->ID : 0 );
+		$referer  = ! empty( $submission->referer_url ) ? (string) $submission->referer_url : (string) wp_get_raw_referer();
+
+		$this->context = array(
+			'form'   => $form_key,
+			'source' => $form_key,
+			'page'   => $this->page_from_url( $referer ),
+			'emails' => 0,
+		);
+	}
+
+	public function html_forms_email() {
+		if ( $this->context ) {
+			$this->context['emails']++;
+			$this->context['source'] = $this->context['form'] . ':email-' . $this->context['emails'];
+		}
+	}
+
+	public function html_forms_email_done() {
+		if ( $this->context ) {
+			$this->context['source'] = $this->context['form'];
+		}
+	}
+
+	/** A form plugin has finished sending for this submission. */
+	public function form_end() {
 		$this->context = null;
 	}
 
@@ -191,11 +231,11 @@ class WPEL_Sources {
 	}
 
 	/**
-	 * Settings-page group a source's page picker belongs to: one per
-	 * Forminator form (shared by its notifications), otherwise the source.
+	 * Settings-page group a source's page picker belongs to: one per form
+	 * (shared by its notifications/email actions), otherwise the source.
 	 */
 	public static function group_key( $source ) {
-		return preg_match( '/^(forminator:\d+)(:|$)/', $source, $m ) ? $m[1] : $source;
+		return preg_match( '/^((?:forminator|html-forms):\d+)(:|$)/', $source, $m ) ? $m[1] : $source;
 	}
 
 	/* -------------------------------------------------------------------- */
@@ -215,6 +255,15 @@ class WPEL_Sources {
 			if ( ! empty( $m[2] ) ) {
 				$notification = $form ? $this->forminator_notification_by_slug( $form, $m[2] ) : null;
 				$label       .= ' — ' . ( $notification && ! empty( $notification['label'] ) ? $notification['label'] : $m[2] );
+			}
+			return $label;
+		}
+
+		if ( preg_match( '/^html-forms:(\d+)(?::email-(\d+))?$/', $source, $m ) ) {
+			$form  = $this->html_forms_form( (int) $m[1] );
+			$label = ( $form && '' !== $form->title ? $form->title : 'Form #' . $m[1] ) . ' (HTML Forms)';
+			if ( ! empty( $m[2] ) ) {
+				$label .= ' — Email #' . $m[2];
 			}
 			return $label;
 		}
@@ -248,20 +297,44 @@ class WPEL_Sources {
 		return '' !== $title ? $title : '#' . (int) $page_id;
 	}
 
-	/** Whether Forminator is active, so its forms can be listed. */
-	public function has_forminator() {
-		return class_exists( 'Forminator_API' );
+	/** Form plugins this class knows, by source prefix => display name. */
+	const FORM_PLUGINS = array(
+		'forminator' => 'Forminator',
+		'html-forms' => 'HTML Forms',
+	);
+
+	/** Whether a form plugin (a FORM_PLUGINS prefix) is active, so its forms can be listed. */
+	public function plugin_active( $prefix ) {
+		if ( 'forminator' === $prefix ) {
+			return class_exists( 'Forminator_API' );
+		}
+		if ( 'html-forms' === $prefix ) {
+			return function_exists( 'hf_get_forms' );
+		}
+		return false;
 	}
 
 	/**
-	 * Forminator forms with their notifications, for the settings page.
+	 * Every active form plugin's forms and the emails each one sends, for
+	 * the settings page.
 	 *
-	 * @return array[] { id, name, notifications: array[] { source, label, recipients } }
+	 * @return array prefix => array( name, forms: array[] { group, id, name, emails: array[] { source, label, recipients } } )
 	 */
-	public function forminator_forms() {
-		if ( ! $this->has_forminator() ) {
-			return array();
+	public function form_plugins() {
+		$out = array();
+		foreach ( self::FORM_PLUGINS as $prefix => $name ) {
+			if ( $this->plugin_active( $prefix ) ) {
+				$out[ $prefix ] = array(
+					'name'  => $name,
+					'forms' => 'forminator' === $prefix ? $this->forminator_forms() : $this->html_forms_forms(),
+				);
+			}
 		}
+		return $out;
+	}
+
+	/** @return array[] Forminator forms, one email per notification. */
+	private function forminator_forms() {
 		$models = Forminator_API::get_forms( null, 1, 200 );
 		if ( ! is_array( $models ) ) {
 			return array();
@@ -272,9 +345,10 @@ class WPEL_Sources {
 			if ( empty( $form->id ) ) {
 				continue;
 			}
-			$this->forms[ (int) $form->id ] = $form;
+			$group                 = 'forminator:' . (int) $form->id;
+			$this->forms[ $group ] = $form;
 
-			$notifications = array();
+			$emails = array();
 			foreach ( ( isset( $form->notifications ) && is_array( $form->notifications ) ? $form->notifications : array() ) as $n ) {
 				if ( empty( $n['slug'] ) ) {
 					continue;
@@ -283,58 +357,112 @@ class WPEL_Sources {
 					? 'conditional recipients'
 					: ( isset( $n['recipients'] ) ? (string) $n['recipients'] : '' );
 
-				$notifications[] = array(
-					'source'     => self::clean( 'forminator:' . (int) $form->id . ':' . $n['slug'] ),
+				$emails[] = array(
+					'source'     => self::clean( $group . ':' . $n['slug'] ),
 					'label'      => ! empty( $n['label'] ) ? $n['label'] : $n['slug'],
 					'recipients' => $recipients,
 				);
 			}
 
 			$out[] = array(
-				'id'            => (int) $form->id,
-				'name'          => $this->forminator_form_name( $form ),
-				'notifications' => $notifications,
+				'group'  => $group,
+				'id'     => (int) $form->id,
+				'name'   => $this->forminator_form_name( $form ),
+				'emails' => $emails,
 			);
 		}
 		return $out;
 	}
 
 	/**
-	 * Pages a Forminator form can be picked on: where its shortcode or block
-	 * appears in post content, plus any page a logged submission came from
-	 * (which also covers page builders that keep content elsewhere).
+	 * @return array[] HTML Forms forms, one email per "Send Email" action,
+	 *                 numbered the same way as html_forms_email() does.
+	 */
+	private function html_forms_forms() {
+		$out = array();
+		foreach ( hf_get_forms() as $form ) {
+			$group                 = 'html-forms:' . (int) $form->ID;
+			$this->forms[ $group ] = $form;
+
+			$emails = array();
+			$n      = 0;
+			foreach ( ( isset( $form->settings['actions'] ) && is_array( $form->settings['actions'] ) ? $form->settings['actions'] : array() ) as $action ) {
+				if ( ! isset( $action['type'] ) || 'email' !== $action['type'] ) {
+					continue;
+				}
+				$n++;
+				$emails[] = array(
+					'source'     => $group . ':email-' . $n,
+					'label'      => 'Email #' . $n,
+					'recipients' => isset( $action['to'] ) ? (string) $action['to'] : '',
+				);
+			}
+
+			$out[] = array(
+				'group'  => $group,
+				'id'     => (int) $form->ID,
+				'name'   => '' !== $form->title ? $form->title : 'Form #' . $form->ID,
+				'emails' => $emails,
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Pages a form can be picked on: where its shortcode or block appears in
+	 * post content, plus any page a logged submission came from (which also
+	 * covers page builders that keep content elsewhere).
 	 *
+	 * @param string $group e.g. 'forminator:83', 'html-forms:12'.
 	 * @return array page id => title
 	 */
-	public function forminator_pages( $form_id ) {
+	public function form_pages( $group ) {
 		global $wpdb;
-		$form_id = (int) $form_id;
+		list( $prefix, $form_id ) = array_pad( explode( ':', $group, 2 ), 2, 0 );
+		$form_id                  = (int) $form_id;
 
-		$likes = array(
-			'%' . $wpdb->esc_like( '[forminator_form id="' . $form_id . '"' ) . '%',
-			'%' . $wpdb->esc_like( "[forminator_form id='" . $form_id . "'" ) . '%',
-			'%' . $wpdb->esc_like( '"module_id":"' . $form_id . '"' ) . '%',
-		);
-		$ids = $wpdb->get_col(
-			$wpdb->prepare(
+		$needles = array();
+		if ( 'forminator' === $prefix ) {
+			$needles = array(
+				'[forminator_form id="' . $form_id . '"',
+				"[forminator_form id='" . $form_id . "'",
+				'"module_id":"' . $form_id . '"',
+			);
+		} elseif ( 'html-forms' === $prefix ) {
+			$needles = array(
+				'[hf_form id="' . $form_id . '"',
+				"[hf_form id='" . $form_id . "'",
+			);
+			$form = $this->html_forms_form( $form_id );
+			if ( $form && '' !== $form->slug ) {
+				$needles[] = '[hf_form slug="' . $form->slug . '"';
+				$needles[] = "[hf_form slug='" . $form->slug . "'";
+				$needles[] = '<!-- wp:html-forms/form {"slug":"' . $form->slug . '"';
+			}
+		}
+
+		$ids = array();
+		if ( $needles ) {
+			$likes = array();
+			foreach ( $needles as $needle ) {
+				$likes[] = $wpdb->prepare( 'post_content LIKE %s', '%' . $wpdb->esc_like( $needle ) . '%' );
+			}
+			$ids = $wpdb->get_col(
 				"SELECT ID FROM {$wpdb->posts}
 				 WHERE post_status IN ('publish','private','draft')
 				   AND post_type NOT IN ('revision','nav_menu_item')
-				   AND ( post_content LIKE %s OR post_content LIKE %s OR post_content LIKE %s )
-				 LIMIT 50",
-				$likes[0],
-				$likes[1],
-				$likes[2]
-			)
-		);
+				   AND ( " . implode( ' OR ', $likes ) . ' )
+				 LIMIT 50'
+			);
+		}
 
 		$logged = $wpdb->get_col(
 			$wpdb->prepare(
 				'SELECT DISTINCT source_page FROM ' . WPEL_Mailgun_Monitor::table() . '
 				 WHERE source_page > 0 AND ( source = %s OR source LIKE %s )
 				 LIMIT 50',
-				'forminator:' . $form_id,
-				$wpdb->esc_like( 'forminator:' . $form_id . ':' ) . '%'
+				$group,
+				$wpdb->esc_like( $group . ':' ) . '%'
 			)
 		);
 
@@ -342,15 +470,22 @@ class WPEL_Sources {
 	}
 
 	/**
-	 * Non-Forminator sources seen in the log, with the pages each came from.
+	 * Sources seen in the log other than those of active form plugins (which
+	 * the settings page lists by form instead), with the pages each came from.
 	 *
 	 * @return array source => array( page id => title )
 	 */
 	public function logged_sources() {
 		global $wpdb;
+		$exclude = '';
+		foreach ( array_keys( self::FORM_PLUGINS ) as $prefix ) {
+			if ( $this->plugin_active( $prefix ) ) {
+				$exclude .= $wpdb->prepare( ' AND source NOT LIKE %s', $wpdb->esc_like( $prefix . ':' ) . '%' );
+			}
+		}
 		$rows = $wpdb->get_results(
 			"SELECT source, source_page FROM " . WPEL_Mailgun_Monitor::table() . "
-			 WHERE source IS NOT NULL AND source <> '' AND source NOT LIKE 'forminator:%'
+			 WHERE source IS NOT NULL AND source <> ''{$exclude}
 			 GROUP BY source, source_page
 			 ORDER BY source
 			 LIMIT 500"
@@ -391,11 +526,28 @@ class WPEL_Sources {
 	}
 
 	private function forminator_form( $id ) {
-		if ( ! array_key_exists( $id, $this->forms ) ) {
-			$form               = $this->has_forminator() ? Forminator_API::get_form( $id ) : null;
-			$this->forms[ $id ] = ( $form && ! is_wp_error( $form ) ) ? $form : null;
+		$group = 'forminator:' . $id;
+		if ( ! array_key_exists( $group, $this->forms ) ) {
+			$form                  = $this->plugin_active( 'forminator' ) ? Forminator_API::get_form( $id ) : null;
+			$this->forms[ $group ] = ( $form && ! is_wp_error( $form ) ) ? $form : null;
 		}
-		return $this->forms[ $id ];
+		return $this->forms[ $group ];
+	}
+
+	private function html_forms_form( $id ) {
+		$group = 'html-forms:' . $id;
+		if ( ! array_key_exists( $group, $this->forms ) ) {
+			$form = null;
+			if ( $this->plugin_active( 'html-forms' ) ) {
+				try {
+					$form = hf_get_form( $id );
+				} catch ( Exception $e ) {
+					$form = null; // deleted form
+				}
+			}
+			$this->forms[ $group ] = $form;
+		}
+		return $this->forms[ $group ];
 	}
 
 	private function forminator_form_name( $form ) {

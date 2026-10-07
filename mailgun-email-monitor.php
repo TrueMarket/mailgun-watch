@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.11
+ * Version:     2.2.12
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -82,7 +82,7 @@
  *     that still has open_count = 0 past a configurable number of hours, and
  *     flags each row once, in one summary text per run (see check_unopened() in
  *     includes/class-wpel-monitor.php). It can be limited to chosen sources,
- *     e.g. one Forminator form's admin notification, optionally only from one
+ *     e.g. one Forminator notification or HTML Forms email action, optionally only from one
  *     page: every row records what sent it (see includes/class-wpel-sources.php).
  *   - Slack support still exists in the code (notify_slack() in
  *     class-wpel-monitor.php) but every call site is currently commented out
@@ -120,7 +120,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.11' );
+define( 'WPEL_VERSION', '2.2.12' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

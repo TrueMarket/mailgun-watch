@@ -118,8 +118,8 @@ class WPEL_Admin {
 
 	/**
 	 * The ticked sources for the unopened alert, as source => page id. Each
-	 * source takes its page from its group's picker (one per Forminator form,
-	 * shared by that form's notifications); see WPEL_Sources::group_key().
+	 * source takes its page from its group's picker (one per form, shared by
+	 * that form's emails); see WPEL_Sources::group_key().
 	 * Kept while the scope is "all" (the fields still submit, just hidden),
 	 * so switching back doesn't lose the list.
 	 */
@@ -853,7 +853,7 @@ class WPEL_Admin {
 							<th scope="row">Alert on unopened email</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_unopened]" value="1" <?php checked( ! empty( $o['alert_unopened'] ) ); ?>> Alert by SMS when a delivered email still hasn't been opened after</label>
 							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours
-							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron; each email is only alerted once, and each check sends at most one text listing everything it found.</p></td>
+							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron.</p></td>
 						</tr>
 						<tr>
 							<th scope="row">Unopened alerts cover</th>
@@ -1077,10 +1077,11 @@ class WPEL_Admin {
 
 	/**
 	 * "Unopened alerts cover" setting: every delivered email, or only the
-	 * ticked sources. Lists each Forminator form's notifications (so the
-	 * notification to the business can be watched without the visitor's
-	 * auto-reply), then any other source seen in the log. Each form, or
-	 * other source, gets an optional page picker.
+	 * ticked sources. Lists each form plugin's forms with the emails each
+	 * sends (Forminator notifications, HTML Forms "Send Email" actions), so
+	 * the email to the business can be watched without the visitor's
+	 * auto-reply, then any other source seen in the log. Each form, or other
+	 * source, gets an optional page picker.
 	 */
 	private function render_unopened_watch( $o ) {
 		$sources  = WPEL_Sources::instance();
@@ -1136,33 +1137,32 @@ class WPEL_Admin {
 		</fieldset>
 
 		<div id="wpel-unopened-watch"<?php echo 'selected' === $scope ? '' : ' style="display:none"'; ?>>
-			<?php if ( $sources->has_forminator() ) : ?>
-				<h4>Forminator forms</h4>
-				<?php $forms = $sources->forminator_forms(); ?>
-				<?php if ( ! $forms ) : ?>
-					<p class="description">No Forminator forms yet.</p>
+			<?php foreach ( $sources->form_plugins() as $plugin ) : ?>
+				<h4><?php echo esc_html( $plugin['name'] ); ?> forms</h4>
+				<?php if ( ! $plugin['forms'] ) : ?>
+					<p class="description">No <?php echo esc_html( $plugin['name'] ); ?> forms yet.</p>
 				<?php endif; ?>
-				<?php foreach ( $forms as $form ) : ?>
+				<?php foreach ( $plugin['forms'] as $form ) : ?>
 					<div class="wpel-watch-group">
 						<strong><?php echo esc_html( $form['name'] ); ?></strong> <span class="description">#<?php echo (int) $form['id']; ?></span>
-						<?php if ( ! $form['notifications'] ) : ?>
-							<p class="description">This form has no email notifications.</p>
+						<?php if ( ! $form['emails'] ) : ?>
+							<p class="description">This form doesn't send any emails.</p>
 						<?php endif; ?>
 						<?php
-						foreach ( $form['notifications'] as $n ) {
-							$checkbox( $n['source'], $n['label'], $n['recipients'] );
+						foreach ( $form['emails'] as $email ) {
+							$checkbox( $email['source'], $email['label'], $email['recipients'] );
 						}
-						if ( $form['notifications'] ) {
-							$page_picker( 'forminator:' . $form['id'], $sources->forminator_pages( $form['id'] ), 'Only when submitted on' );
+						if ( $form['emails'] ) {
+							$page_picker( $form['group'], $sources->form_pages( $form['group'] ), 'Only when submitted on' );
 						}
 						?>
 					</div>
 				<?php endforeach; ?>
-			<?php endif; ?>
+			<?php endforeach; ?>
 
 			<?php
 			// Everything else the log has seen, plus anything still ticked that
-			// isn't listed above (a deleted form, or Forminator deactivated), so
+			// isn't listed above (a deleted form, or its plugin deactivated), so
 			// saving the page doesn't silently drop it.
 			$others = $sources->logged_sources();
 			foreach ( array_keys( $watch ) as $source ) {
@@ -1183,7 +1183,7 @@ class WPEL_Admin {
 				<?php endforeach; ?>
 			<?php endif; ?>
 
-			<p class="description">An email's source is recorded when it's sent, so a source only shows up under "Other sources" once it has sent something. Ticking nothing means no unopened alerts at all. To watch a form's emails to your team without the visitor's auto-reply, tick only the notification that goes to your team.</p>
+			<p class="description">An email's source is recorded when it's sent, so a source only shows up under "Other sources" once it has sent something. Ticking nothing means no unopened alerts at all. To watch a form's emails to your team without the visitor's auto-reply, tick only the email that goes to your team. HTML Forms emails are numbered by their order in the form's actions, so reordering or removing a "Send Email" action changes which one is ticked.</p>
 		</div>
 		<?php
 	}
