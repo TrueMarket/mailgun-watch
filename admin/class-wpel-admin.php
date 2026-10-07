@@ -777,7 +777,7 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">SMS alerts</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio. Repeats of the same failure are grouped for an hour, and at most 10 alert texts are sent per hour.</p></td>
+							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio.</p></td>
 						</tr>
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
