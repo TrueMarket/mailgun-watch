@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Mailgun Watch
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.12
+ * Version:     2.2.13
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -77,11 +77,13 @@
  *   - If failures pile up with no successful sends in the window, a distinct
  *     "ALL EMAIL MAY BE DOWN" alarm is texted (throttled), because in that
  *     scenario the alert email itself cannot get out.
- *   - UNOPENED SWEEP (optional, opt-in via Settings, requires open tracking
- *     above): an hourly cron (wpel_check_unopened) flags any 'delivered' row
+ *   - UNOPENED SWEEP (on whenever open tracking above is enabled and the
+ *     chosen channel can deliver; no separate switch): an hourly cron (wpel_check_unopened) flags any 'delivered' row
  *     that still has open_count = 0 past a configurable number of hours, and
- *     flags each row once, in one summary text per run (see check_unopened() in
- *     includes/class-wpel-monitor.php). It can be limited to chosen sources,
+ *     flags each row once, in one summary alert per run, sent by text, email
+ *     or both (see check_unopened() in
+ *     includes/class-wpel-monitor.php). An optional secondary notice alerts
+ *     again for rows still unopened past a second, later threshold. It can be limited to chosen sources,
  *     e.g. one Forminator notification or HTML Forms email action, optionally only from one
  *     page: every row records what sent it (see includes/class-wpel-sources.php).
  *   - Slack support still exists in the code (notify_slack() in
@@ -103,8 +105,7 @@
  *     Domain-level, pick this site's domain), add a webhook pointing at:
  *       https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
  *     subscribed to at least: accepted, delivered, permanent_fail
- *     (temporary_fail optional; opened required if you enable open tracking
- *     and/or the unopened-email alert).
+ *     (temporary_fail optional; opened required if you enable open tracking).
  *   - Use the "Send test email" button on the Settings page to confirm sending works.
  *
  * FILE LAYOUT
@@ -120,7 +121,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.12' );
+define( 'WPEL_VERSION', '2.2.13' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

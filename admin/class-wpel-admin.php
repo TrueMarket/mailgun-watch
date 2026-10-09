@@ -95,9 +95,11 @@ class WPEL_Admin {
 		$out['retention_days']   = max( 0, (int) ( isset( $input['retention_days'] ) ? $input['retention_days'] : 30 ) );
 		$out['outage_threshold'] = max( 1, (int) ( isset( $input['outage_threshold'] ) ? $input['outage_threshold'] : 5 ) );
 		$out['outage_window']    = max( 1, (int) ( isset( $input['outage_window'] ) ? $input['outage_window'] : 15 ) );
-		$out['alert_unopened']   = ! empty( $input['alert_unopened'] ) ? 1 : 0;
 		$out['unopened_hours']   = max( 1, (int) ( isset( $input['unopened_hours'] ) ? $input['unopened_hours'] : 24 ) );
-		$out['unopened_scope']   = ( isset( $input['unopened_scope'] ) && 'selected' === $input['unopened_scope'] ) ? 'selected' : 'all';
+		$out['unopened_channel'] = ( isset( $input['unopened_channel'] ) && in_array( $input['unopened_channel'], array( 'sms', 'email', 'both' ), true ) ) ? $input['unopened_channel'] : 'sms';
+		$out['unopened_second']  = ! empty( $input['unopened_second'] ) ? 1 : 0;
+		// The secondary notice always comes after the first alert.
+		$out['unopened_second_hours'] = max( $out['unopened_hours'] + 1, (int) ( isset( $input['unopened_second_hours'] ) ? $input['unopened_second_hours'] : 48 ) );
 		$out['unopened_watch']   = $this->sanitize_unopened_watch( $input );
 
 		// A previously-passing webhook check or test send no longer proves
@@ -113,6 +115,20 @@ class WPEL_Admin {
 			);
 		}
 
+		// When unopened alerts start running, the emails already in the log
+		// were either sent without the tracking pixel or went unchecked while
+		// alerts were off, so the first check would flag all of them at once.
+		$monitor = WPEL_Mailgun_Monitor::instance();
+		if ( $monitor->unopened_alerts_enabled( $out ) && ! $monitor->unopened_alerts_enabled( $previous ) ) {
+			$monitor->skip_unopened_backlog();
+		}
+
+		// Older emails already past the secondary threshold would all get a
+		// second notice at once.
+		if ( $out['unopened_second'] && empty( $previous['unopened_second'] ) ) {
+			$monitor->skip_second_unopened_backlog( $out['unopened_second_hours'] );
+		}
+
 		return $out;
 	}
 
@@ -120,8 +136,6 @@ class WPEL_Admin {
 	 * The ticked sources for the unopened alert, as source => page id. Each
 	 * source takes its page from its group's picker (one per form, shared by
 	 * that form's emails); see WPEL_Sources::group_key().
-	 * Kept while the scope is "all" (the fields still submit, just hidden),
-	 * so switching back doesn't lose the list.
 	 */
 	private function sanitize_unopened_watch( $input ) {
 		$sources = isset( $input['unopened_sources'] ) ? (array) $input['unopened_sources'] : array();
@@ -700,6 +714,9 @@ class WPEL_Admin {
 		$transport       = WPEL_Mailer::instance()->transport();
 		$smtp_encryption = isset( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
 		$sms_enabled     = WPEL_Mailgun_Monitor::instance()->sms_enabled();
+		$track_opens     = ! empty( $o['track_opens'] );
+		$unopened_channel = WPEL_Mailgun_Monitor::instance()->unopened_channel( $o );
+		$unopened_second = ! empty( $o['unopened_second'] );
 		?>
 		<div class="wrap">
 			<h1>Settings</h1>
@@ -710,14 +727,81 @@ class WPEL_Admin {
 			<div class="wpel-settings-main">
 
 			<h2 class="nav-tab-wrapper" id="wpel-tabs">
-				<a href="#" class="nav-tab nav-tab-active" data-tab="wpel-tab-mailgun">Sending</a>
+				<a href="#" class="nav-tab nav-tab-active" data-tab="wpel-tab-general">General</a>
+				<a href="#" class="nav-tab" data-tab="wpel-tab-mailgun">Sending</a>
 				<a href="#" class="nav-tab" data-tab="wpel-tab-alerting">Alerting &amp; Logging</a>
 			</h2>
 
 			<form method="post" action="options.php">
 				<?php settings_fields( 'wpel_settings_group' ); ?>
 
-				<div id="wpel-tab-mailgun" class="wpel-tab-panel">
+				<?php // Client-facing: everyday settings in plain language. The technical setup lives on the other two tabs. ?>
+				<div id="wpel-tab-general" class="wpel-tab-panel">
+					<div class="wpel-intro">
+						<p><strong>Mailgun Watch makes sure the emails your website sends actually arrive</strong>, such as contact form messages and order notifications.</p>
+						<ul>
+							<li>Every email your website sends is recorded in the <a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>">Log</a>, along with whether it was delivered.</li>
+							<li>If an email can't be delivered, you get an alert by email, and by text message if you turn that on below.</li>
+							<li>If your website stops sending email altogether, a text message lets you know, even though email can't get through.</li>
+							<li>You can also get an alert by text, email or both when an important email, like a new enquiry, hasn't been opened.</li>
+						</ul>
+					</div>
+
+					<table class="form-table" role="presentation">
+						<tr>
+							<th scope="row"><label for="wpel_alert_email">Alert email recipient</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_email]" id="wpel_alert_email" type="email" multiple class="regular-text" placeholder="<?php echo esc_attr( get_option( 'admin_email' ) ); ?>" value="<?php echo esc_attr( isset( $o['alert_email'] ) ? $o['alert_email'] : '' ); ?>">
+							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
+							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
+							<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
+							<button type="submit" class="button" form="wpel-test-email-form" style="margin-left:8px;">Send test email</button>
+							<p class="description">Who gets an email when something goes wrong. Separate several addresses with commas. If left blank, alerts go to the site's admin email shown in the box. Save your changes before sending a test.</p></td>
+						</tr>
+						<tr>
+							<th scope="row">SMS alerts</th>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
+							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working.</p></td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
+							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
+							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_sms' ) ); ?>" form="wpel-test-sms-form">
+							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
+							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
+							<p class="description">Mobile numbers that get the text alerts. Separate several numbers with commas. Save your changes before sending a test.</p></td>
+						</tr>
+						<tr>
+							<th scope="row">Track opens</th>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[track_opens]" id="wpel_track_opens" value="1" <?php checked( $track_opens ); ?>> Track when emails are opened</label>
+							<p class="description">Shows in the Log whether each email was opened. Treat it as a good hint, not a guarantee: some email apps open emails automatically. Turning this on also lets you get an alert when an important email hasn't been opened.</p></td>
+						</tr>
+						<tr class="wpel-unopened-row"<?php echo $track_opens ? '' : ' style="display:none"'; ?>>
+							<th scope="row"><label for="wpel_unopened_hours">Unopened email alerts</label></th>
+							<td>Alert me when a delivered email still hasn't been opened after
+							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" id="wpel_unopened_hours" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours
+							<fieldset style="margin:10px 0 0;">
+								<legend style="float:left;margin-right:12px;">Send by:</legend>
+								<?php foreach ( array( 'sms' => 'Text message', 'email' => 'Email', 'both' => 'Both' ) as $value => $label ) : ?>
+									<label style="margin-right:12px;"><input type="radio" name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_channel]" value="<?php echo esc_attr( $value ); ?>" <?php checked( $unopened_channel, $value ); ?>> <?php echo esc_html( $label ); ?></label>
+								<?php endforeach; ?>
+							</fieldset>
+							<?php // Shown by the script below when the chosen channel includes texts but SMS alerts are off. ?>
+							<p id="wpel-unopened-sms-off" class="description" style="color:#b32d2e;<?php echo ( 'email' !== $unopened_channel && ! $sms_enabled ) ? '' : 'display:none;'; ?>">SMS alerts are turned off above, so no texts will be sent. Turn them on, or choose Email.</p>
+							<p class="description">Emails go to the alert email recipient above. Only covers the emails ticked under "Unopened alerts cover" below, and only those sent after open tracking was turned on.</p>
+							<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second]" id="wpel_unopened_second" value="1" <?php checked( $unopened_second ); ?>> Enable secondary notice</label></p>
+							<p id="wpel-unopened-second-hours"<?php echo $unopened_second ? '' : ' style="display:none"'; ?>>Alert again if it's still unopened after
+							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second_hours]" type="number" min="2" value="<?php echo esc_attr( isset( $o['unopened_second_hours'] ) ? $o['unopened_second_hours'] : 48 ); ?>" style="width:70px"> hours
+							<span class="description">(counted from when the email was sent, so this must be more than the first)</span></p></td>
+						</tr>
+						<tr class="wpel-unopened-row"<?php echo $track_opens ? '' : ' style="display:none"'; ?>>
+							<th scope="row">Unopened alerts cover</th>
+							<td><?php $this->render_unopened_watch( $o ); ?></td>
+						</tr>
+					</table>
+				</div>
+
+				<div id="wpel-tab-mailgun" class="wpel-tab-panel" style="display:none">
 					<p style="margin-top:16px;">
 						<strong>Currently sending via:</strong> <?php echo esc_html( $this->transport_label( $transport ) ); ?>.
 					</p>
@@ -789,49 +873,28 @@ class WPEL_Admin {
 				</div>
 
 				<div id="wpel-tab-alerting" class="wpel-tab-panel" style="display:none">
+					<h2 class="title">Twilio (SMS)</h2>
+					<p class="description">Used to send SMS alerts. Turn SMS alerts on, and set the numbers they go to, on the General tab.</p>
 					<table class="form-table" role="presentation">
 						<tr>
-							<th scope="row"><label for="wpel_alert_email">Alert email recipient</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_email]" id="wpel_alert_email" type="email" multiple class="regular-text" value="<?php echo esc_attr( isset( $o['alert_email'] ) ? $o['alert_email'] : '' ); ?>">
-							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
-							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
-							<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
-							<button type="submit" class="button" form="wpel-test-email-form" style="margin-left:8px;">Send test email</button>
-							<p class="description">Separate multiple addresses with a comma. Save changes before sending a test email — it goes through whichever transport is active (currently <?php echo esc_html( $this->transport_label( $transport ) ); ?>) and is logged like any other send.</p></td>
-						</tr>
-						<tr>
-							<th scope="row">SMS alerts</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">SMS alerts are sent when certain events occur, ensuring you are notified even if email delivery fails. Managed via Twilio.</p></td>
-						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_account_sid]" id="wpel_twilio_account_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_account_sid'] ) ? $o['twilio_account_sid'] : '' ); ?>" placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
 							<p class="description">Starts with <code>AC</code>. Copy it from <strong>Account Info</strong> on the <a href="https://console.twilio.com/" target="_blank">Twilio Console</a> home page.</p></td>
 						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+						<tr>
 							<th scope="row"><label for="wpel_twilio_sid">Twilio API Key SID</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_sid]" id="wpel_twilio_sid" type="text" class="regular-text" autocomplete="off" value="<?php echo esc_attr( isset( $o['twilio_sid'] ) ? $o['twilio_sid'] : '' ); ?>" placeholder="SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
 							<p class="description">Optional. Starts with <code>SK</code>. Create one under <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">API keys &amp; tokens</a> — unlike the Auth Token, it can be revoked on its own. Leave blank to use the Account SID with your account's Auth Token.</p></td>
 						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+						<tr>
 							<th scope="row"><label for="wpel_twilio_auth_token">Twilio auth token</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_auth_token]" id="wpel_twilio_auth_token" type="password" class="regular-text" autocomplete="new-password" value="<?php echo ! empty( $o['twilio_auth_token'] ) ? esc_attr( self::SAVED_SECRET_MASK ) : ''; ?>">
 							<p class="description">The API key's secret. Click "show" on the Twilio dashboard to see the token <a href="https://console.twilio.com/us1/account/keys-credentials/api-keys" target="_blank">here</a></td>
 						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+						<tr>
 							<th scope="row"><label for="wpel_twilio_from">Twilio phone number</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_from_number]" id="wpel_twilio_from" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_from_number'] ) ? $o['twilio_from_number'] : '' ); ?>" placeholder="+555-123-4567">
 							<p class="description">The number alerts are sent from. Pick one of your <a href="https://console.twilio.com/us1/develop/phone-numbers/manage/incoming" target="_blank">active Twilio numbers</a>.</p></td>
-						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
-							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
-							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
-							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_sms' ) ); ?>" form="wpel-test-sms-form">
-							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
-							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
-							<p class="description">Separate multiple numbers with a comma. Save changes before sending a test SMS.</p></td>
 						</tr>
 						<?php /* Slack hidden for now — functionality still exists (see notify_slack() in class-wpel-monitor.php), just not rendered here.
 						<tr>
@@ -844,26 +907,17 @@ class WPEL_Admin {
 							</p></td>
 						</tr>
 						*/ ?>
-						<tr>
-							<th scope="row">Track opens</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[track_opens]" value="1" <?php checked( ! empty( $o['track_opens'] ) ); ?>> Ask Mailgun to track opens (embeds a tracking pixel in HTML emails)</label>
-							<p class="description">Requires subscribing the webhook endpoint below to the <code>opened</code> event. Only works for HTML mail, and privacy features like Apple Mail Privacy Protection can auto-fetch the pixel on delivery regardless of whether anyone reads the email — treat opens as a soft signal, not a read receipt.</p></td>
-						</tr>
-						<tr>
-							<th scope="row">Alert on unopened email</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[alert_unopened]" value="1" <?php checked( ! empty( $o['alert_unopened'] ) ); ?>> Alert by SMS when a delivered email still hasn't been opened after</label>
-							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours
-							<p class="description">Requires "Track opens" above to be enabled — without open tracking every delivered email looks unopened, and you'd get a false alert for all of them. Checked hourly by cron.</p></td>
-						</tr>
-						<tr>
-							<th scope="row">Unopened alerts cover</th>
-							<td><?php $this->render_unopened_watch( $o ); ?></td>
-						</tr>
+					</table>
+
+					<hr style="margin:24px 0;">
+
+					<h2 class="title">Webhook &amp; logging</h2>
+					<table class="form-table" role="presentation">
 						<tr>
 							<th scope="row">Webhook endpoint</th>
 							<td><code id="wpel_webhook_url"><?php echo esc_html( rest_url( 'wpel/v1/mailgun-webhook' ) ); ?></code>
 							<button type="button" class="button-link" data-wpel-copy="wpel_webhook_url" style="margin-left:8px;">Copy</button>
-							<p class="description">Add this URL in Mailgun for events: accepted, delivered, permanent_fail (temporary_fail optional; opened required if "Track opens" above is enabled).</p></td>
+							<p class="description">Add this URL in Mailgun for events: accepted, delivered, permanent_fail (temporary_fail optional; opened required if "Track opens" on the General tab is enabled). Open tracking only works for HTML mail, and privacy features like Apple Mail Privacy Protection can fetch the tracking pixel on delivery whether or not anyone reads the email.</p></td>
 						</tr>
 						<tr>
 							<th scope="row">Webhook description</th>
@@ -901,8 +955,11 @@ class WPEL_Admin {
 			.wpel-settings-sidebar { flex: 0 0 340px; width: 340px; }
 			.wpel-settings-sidebar .postbox ol { margin: 0 0 12px; }
 			.wpel-settings-sidebar .postbox li { margin-bottom: 12px; line-height: 1.5; }
-			#wpel-unopened-watch { margin-top: 12px; padding-left: 24px; }
+			.wpel-intro { max-width: 760px; margin-top: 16px; padding: 4px 16px; background: #fff; border: 1px solid #dcdcde; border-left: 4px solid #2271b1; }
+			.wpel-intro p { font-size: 14px; }
+			.wpel-intro ul { margin-left: 1.5em; list-style: disc; }
 			#wpel-unopened-watch h4 { margin: 12px 0 6px; }
+			#wpel-unopened-watch h4:first-child { margin-top: 0; }
 			.wpel-watch-group { margin: 0 0 10px; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; }
 			.wpel-watch-group .wpel-watch-source, .wpel-watch-group .wpel-watch-page { display: block; margin-top: 6px; }
 			@media (max-width: 960px) {
@@ -912,8 +969,9 @@ class WPEL_Admin {
 		</style>
 		<script>
 		( function () {
-			var tabs   = document.querySelectorAll( '#wpel-tabs .nav-tab' );
-			var panels = document.querySelectorAll( '.wpel-tab-panel' );
+			var tabs    = document.querySelectorAll( '#wpel-tabs .nav-tab' );
+			var panels  = document.querySelectorAll( '.wpel-tab-panel' );
+			var sidebar = document.querySelector( '.wpel-settings-sidebar' );
 			var storageKey = 'wpel_active_settings_tab';
 
 			function activate( id ) {
@@ -923,6 +981,11 @@ class WPEL_Admin {
 				panels.forEach( function ( p ) {
 					p.style.display = ( p.id === id ) ? '' : 'none';
 				} );
+				// The setup checklist is for whoever sets the site up, not for
+				// the client-facing General tab.
+				if ( sidebar ) {
+					sidebar.style.display = 'wpel-tab-general' === id ? 'none' : '';
+				}
 				try {
 					window.localStorage.setItem( storageKey, id );
 				} catch ( e ) {}
@@ -945,31 +1008,47 @@ class WPEL_Admin {
 		} )();
 
 		( function () {
-			// "Enable SMS alerts" shows/hides the Twilio fields. Hidden fields
-			// still submit, so their saved values survive toggling it off.
-			var toggle = document.getElementById( 'wpel_sms_enabled' );
-			if ( ! toggle ) {
+			// The unopened-alert rows only apply with "Track opens" on, so
+			// they're shown only then. Hidden fields still submit, so their
+			// saved values survive toggling it off. Also warns when the chosen
+			// channel includes texts but SMS alerts are off.
+			var sms      = document.getElementById( 'wpel_sms_enabled' );
+			var opens    = document.getElementById( 'wpel_track_opens' );
+			var smsOff   = document.getElementById( 'wpel-unopened-sms-off' );
+			var channels = document.querySelectorAll( 'input[name$="[unopened_channel]"]' );
+			if ( ! sms || ! opens || ! smsOff ) {
 				return;
 			}
-			var rows = document.querySelectorAll( '.wpel-sms-row' );
-			toggle.addEventListener( 'change', function () {
+			var rows = document.querySelectorAll( '.wpel-unopened-row' );
+			function sync() {
 				rows.forEach( function ( r ) {
-					r.style.display = toggle.checked ? '' : 'none';
+					r.style.display = opens.checked ? '' : 'none';
 				} );
+				var channel = 'sms';
+				channels.forEach( function ( c ) {
+					if ( c.checked ) {
+						channel = c.value;
+					}
+				} );
+				smsOff.style.display = 'email' !== channel && ! sms.checked ? '' : 'none';
+			}
+			sms.addEventListener( 'change', sync );
+			opens.addEventListener( 'change', sync );
+			channels.forEach( function ( c ) {
+				c.addEventListener( 'change', sync );
 			} );
 		} )();
 
 		( function () {
-			// "Unopened alerts cover" shows the source list only when limited to
-			// selected sources. Like the SMS rows, hidden fields still submit.
-			var list = document.getElementById( 'wpel-unopened-watch' );
-			if ( ! list ) {
+			// "Enable secondary notice" shows/hides its hours field. Like the
+			// unopened rows, the hidden field still submits.
+			var toggle = document.getElementById( 'wpel_unopened_second' );
+			var hours  = document.getElementById( 'wpel-unopened-second-hours' );
+			if ( ! toggle || ! hours ) {
 				return;
 			}
-			document.querySelectorAll( 'input[name$="[unopened_scope]"]' ).forEach( function ( radio ) {
-				radio.addEventListener( 'change', function () {
-					list.style.display = 'selected' === radio.value && radio.checked ? '' : 'none';
-				} );
+			toggle.addEventListener( 'change', function () {
+				hours.style.display = toggle.checked ? '' : 'none';
 			} );
 		} )();
 
@@ -1076,8 +1155,8 @@ class WPEL_Admin {
 	}
 
 	/**
-	 * "Unopened alerts cover" setting: every delivered email, or only the
-	 * ticked sources. Lists each form plugin's forms with the emails each
+	 * "Unopened alerts cover" setting: the sources unopened alerts are
+	 * limited to. Lists each form plugin's forms with the emails each
 	 * sends (Forminator notifications, HTML Forms "Send Email" actions), so
 	 * the email to the business can be watched without the visitor's
 	 * auto-reply, then any other source seen in the log. Each form, or other
@@ -1085,7 +1164,6 @@ class WPEL_Admin {
 	 */
 	private function render_unopened_watch( $o ) {
 		$sources  = WPEL_Sources::instance();
-		$scope    = isset( $o['unopened_scope'] ) && 'selected' === $o['unopened_scope'] ? 'selected' : 'all';
 		$watch    = ! empty( $o['unopened_watch'] ) && is_array( $o['unopened_watch'] ) ? $o['unopened_watch'] : array();
 		$name     = esc_attr( WPEL_OPTION );
 		$rendered = array();
@@ -1131,12 +1209,7 @@ class WPEL_Admin {
 			<?php
 		};
 		?>
-		<fieldset>
-			<label><input type="radio" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_scope]" value="all" <?php checked( 'all', $scope ); ?>> All delivered emails</label><br>
-			<label><input type="radio" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_scope]" value="selected" <?php checked( 'selected', $scope ); ?>> Only emails from the sources ticked below</label>
-		</fieldset>
-
-		<div id="wpel-unopened-watch"<?php echo 'selected' === $scope ? '' : ' style="display:none"'; ?>>
+		<div id="wpel-unopened-watch">
 			<?php foreach ( $sources->form_plugins() as $plugin ) : ?>
 				<h4><?php echo esc_html( $plugin['name'] ); ?> forms</h4>
 				<?php if ( ! $plugin['forms'] ) : ?>
@@ -1183,7 +1256,7 @@ class WPEL_Admin {
 				<?php endforeach; ?>
 			<?php endif; ?>
 
-			<p class="description">An email's source is recorded when it's sent, so a source only shows up under "Other sources" once it has sent something. Ticking nothing means no unopened alerts at all. To watch a form's emails to your team without the visitor's auto-reply, tick only the email that goes to your team. HTML Forms emails are numbered by their order in the form's actions, so reordering or removing a "Send Email" action changes which one is ticked.</p>
+			<p class="description">Tick the emails you want an alert about if they go unopened. For a form, tick just the email that goes to your team, not the confirmation sent to the visitor. If nothing is ticked, no unopened alerts are sent. Other emails only appear under "Other sources" after they've been sent at least once. HTML Forms emails are numbered in the order they appear in the form's settings, so reordering or removing one changes which one is ticked.</p>
 		</div>
 		<?php
 	}
@@ -1233,7 +1306,8 @@ class WPEL_Admin {
 		);
 		$transport_note  = $transport_notes[ WPEL_Mailer::instance()->transport() ];
 		?>
-		<div class="wpel-settings-sidebar">
+		<?php // Hidden on the General tab, which is shown first; the tab script reveals it. ?>
+		<div class="wpel-settings-sidebar" style="display:none">
 			<div class="postbox">
 				<h2 class="hndle" style="padding:10px 12px;margin:0;font-size:14px;">New site setup checklist</h2>
 				<div style="padding:4px 12px 12px;">
@@ -1281,12 +1355,12 @@ class WPEL_Admin {
 							<br><em>Confirmed automatically by <strong>Check Mailgun config</strong> above once it's set up correctly.</em>
 						</li>
 						<li><?php echo $has_alerts ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-							Set an alert email and/or enable SMS alerts on the <strong>Alerting &amp; Logging</strong> tab.
+							Set an alert email and/or enable SMS alerts on the <strong>General</strong> tab (Twilio settings are on the <strong>Alerting &amp; Logging</strong> tab).
 							<?php if ( $sms_incomplete ) : ?>
 								<br><em>SMS alerts are enabled, but the Twilio settings or alert phone numbers aren't filled in yet, so no texts will be sent.</em>
 							<?php endif; ?>
 						</li>
-						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the Alerting &amp; Logging tab to confirm the whole pipeline end to end.</li>
+						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the General tab to confirm the whole pipeline end to end.</li>
 					</ol>
 					<p class="description" style="border-left:3px solid #d63638;padding-left:8px;">
 						<strong>Why the dedicated domain matters:</strong> Mailgun webhooks are registered per sending domain, not per site. If two WordPress installs share one domain, only whichever site's URL is registered in Mailgun gets real delivery data back — the other site's sends still go out fine, they just silently stop reconciling to delivered/failed and lose open tracking.

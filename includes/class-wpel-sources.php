@@ -218,15 +218,12 @@ class WPEL_Sources {
 
 	/**
 	 * Sources the unopened alert is limited to, as source => page id (0 =
-	 * any page), or null when it covers every delivered email.
+	 * any page). Empty means no unopened alerts at all.
 	 *
-	 * @return array|null
+	 * @return array
 	 */
 	public static function watched() {
 		$o = get_option( WPEL_OPTION, array() );
-		if ( empty( $o['unopened_scope'] ) || 'selected' !== $o['unopened_scope'] ) {
-			return null;
-		}
 		return ! empty( $o['unopened_watch'] ) && is_array( $o['unopened_watch'] ) ? $o['unopened_watch'] : array();
 	}
 

@@ -103,6 +103,18 @@ class WPEL_Mailgun_Monitor {
 		return isset( $o[ $key ] ) ? $o[ $key ] : $fallback;
 	}
 
+	/**
+	 * The given settings array, or the saved one when null — lets the
+	 * settings page ask the same questions of the values being saved and
+	 * the ones they replace (see WPEL_Admin::sanitize_settings()).
+	 */
+	private function settings( $o ) {
+		if ( null === $o ) {
+			$o = get_option( WPEL_OPTION, array() );
+		}
+		return is_array( $o ) ? $o : array();
+	}
+
 	/* -------------------------------------------------------------------- */
 	/* Path 1: local pre-send capture                                        */
 	/* -------------------------------------------------------------------- */
@@ -677,7 +689,12 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	private function notify_email( $subject, $body ) {
-		$to = $this->opt( 'alert_email', get_option( 'admin_email' ) );
+		// A blank field (saved or never set) falls back to the admin email,
+		// matching where "Send test email" goes.
+		$to = $this->opt( 'alert_email', '' );
+		if ( ! $to ) {
+			$to = get_option( 'admin_email' );
+		}
 		if ( ! $to ) {
 			return;
 		}
@@ -738,8 +755,8 @@ class WPEL_Mailgun_Monitor {
 	 * they already had alert phone numbers, so upgrading doesn't silently
 	 * stop their texts.
 	 */
-	public function sms_enabled() {
-		$o = get_option( WPEL_OPTION, array() );
+	public function sms_enabled( $o = null ) {
+		$o = $this->settings( $o );
 		if ( isset( $o['sms_enabled'] ) ) {
 			return ! empty( $o['sms_enabled'] );
 		}
@@ -902,7 +919,7 @@ class WPEL_Mailgun_Monitor {
 				array(
 					'to'     => '',
 					'ok'     => false,
-					'detail' => 'SMS alerts are turned off — tick "Enable SMS alerts" on the Alerting & Logging tab, save, then try again.',
+					'detail' => 'SMS alerts are turned off — tick "Enable SMS alerts" on the General tab, save, then try again.',
 				),
 			);
 		}
@@ -924,7 +941,7 @@ class WPEL_Mailgun_Monitor {
 				array(
 					'to'     => '',
 					'ok'     => false,
-					'detail' => 'No alert phone numbers are saved yet — add one on the Alerting & Logging tab, save, then try again.',
+					'detail' => 'No alert phone numbers are saved yet — add one on the General tab, save, then try again.',
 				),
 			);
 		}
@@ -983,69 +1000,186 @@ class WPEL_Mailgun_Monitor {
 	/**
 	 * Hourly cron (wpel_check_unopened): flags 'delivered' emails that have
 	 * sat with open_count = 0 past the configured threshold. Each row is
-	 * alerted at most once (unopened_alerted flag), and each run sends a
-	 * single text however many rows it flags, so a busy site can't turn one
-	 * run into a flood of texts.
+	 * alerted at most once per stage (unopened_alerted), and each run sends
+	 * a single text per stage however many rows it flags, so a busy site
+	 * can't turn one run into a flood of texts.
 	 *
-	 * When limited to selected sources (WPEL_Sources::watched()), only rows
-	 * from those sources count. The filter is applied here rather than at
-	 * send time, so a change to the list also covers emails still waiting
-	 * out the threshold. Rows that don't match are left unflagged.
+	 * Only rows from the ticked sources (WPEL_Sources::watched()) count. The
+	 * filter is applied here rather than at send time, so a change to the
+	 * list also covers emails still waiting out the threshold. Rows that
+	 * don't match are left unflagged.
+	 *
+	 * With the secondary notice on, a row still unopened past
+	 * unopened_second_hours (counted from sending, like unopened_hours) is
+	 * texted once more. unopened_alerted counts the alerts sent: 0 none, 1
+	 * the first, 2 the secondary.
+	 *
+	 * Runs whenever open tracking is on and unopened_channel() has somewhere
+	 * to send to (see unopened_alerts_enabled()): there's no separate
+	 * switch, since without open tracking every delivered email looks
+	 * unopened.
 	 */
 	public function check_unopened() {
-		if ( ! (int) $this->opt( 'alert_unopened', 0 ) ) {
+		if ( ! $this->unopened_alerts_enabled() ) {
 			return;
 		}
-		$hours = max( 1, (int) $this->opt( 'unopened_hours', 24 ) );
+		$scope = $this->unopened_scope();
+		if ( '' === $scope ) {
+			return; // no sources ticked
+		}
 
+		// Secondary first, so a row flagged by the first alert below waits
+		// at least until the next run for its second.
+		if ( $this->opt( 'unopened_second', 0 ) ) {
+			$hours = $this->unopened_second_hours();
+			$rows  = $this->flag_unopened( 1, $hours, $scope );
+			if ( $rows ) {
+				$this->notify_unopened( $rows, $hours, true );
+			}
+		}
+
+		$hours = max( 1, (int) $this->opt( 'unopened_hours', 24 ) );
+		$rows  = $this->flag_unopened( 0, $hours, $scope );
+		if ( $rows ) {
+			$this->notify_unopened( $rows, $hours );
+		}
+	}
+
+	/**
+	 * Hours after sending the secondary notice goes out: always later than
+	 * the first alert.
+	 */
+	public function unopened_second_hours() {
+		$first = max( 1, (int) $this->opt( 'unopened_hours', 24 ) );
+		return max( $first + 1, (int) $this->opt( 'unopened_second_hours', 48 ) );
+	}
+
+	/**
+	 * The ticked sources (WPEL_Sources::watched()) as a prepared SQL
+	 * condition, or '' when none are ticked.
+	 */
+	private function unopened_scope() {
+		global $wpdb;
+		$watch = WPEL_Sources::watched();
+		if ( ! $watch ) {
+			return '';
+		}
+		$clauses = array();
+		foreach ( $watch as $source => $page ) {
+			$clauses[] = $page
+				? $wpdb->prepare( '( source = %s AND source_page = %d )', $source, $page )
+				: $wpdb->prepare( 'source = %s', $source );
+		}
+		return ' AND ( ' . implode( ' OR ', $clauses ) . ' )';
+	}
+
+	/**
+	 * Finds the delivered, unopened rows at alert stage $stage that were sent
+	 * at least $hours ago, moves them to the next stage and returns them.
+	 *
+	 * @param int    $stage unopened_alerted value to look for.
+	 * @param int    $hours
+	 * @param string $scope From unopened_scope().
+	 * @return object[]
+	 */
+	private function flag_unopened( $stage, $hours, $scope ) {
 		global $wpdb;
 		$table  = self::table();
 		$cutoff = $this->local_mysql_time( time() - $hours * HOUR_IN_SECONDS );
-
-		$scope = '';
-		$watch = WPEL_Sources::watched();
-		if ( null !== $watch ) {
-			if ( ! $watch ) {
-				return; // limited to selected sources, but none are selected
-			}
-			$clauses = array();
-			foreach ( $watch as $source => $page ) {
-				$clauses[] = $page
-					? $wpdb->prepare( '( source = %s AND source_page = %d )', $source, $page )
-					: $wpdb->prepare( 'source = %s', $source );
-			}
-			$scope = ' AND ( ' . implode( ' OR ', $clauses ) . ' )';
-		}
 
 		// $scope is already prepared, so it's appended rather than run through prepare() again.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT id, recipient, subject, created_at, source, source_page FROM {$table}
-				 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = 0 AND created_at <= %s",
+				 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = %d AND created_at <= %s",
+				$stage,
 				$cutoff
 			) . $scope . ' ORDER BY id ASC LIMIT 200'
 		);
 
-		if ( ! $rows ) {
-			return;
-		}
-		foreach ( $rows as $row ) {
+		foreach ( (array) $rows as $row ) {
 			// Mark first so a slow/failed notify can't cause the next run to re-alert the same row.
-			$this->update_row( $row->id, array( 'unopened_alerted' => 1 ), 'unopened_alert' );
+			$this->update_row( $row->id, array( 'unopened_alerted' => $stage + 1 ), $stage ? 'unopened_alert_second' : 'unopened_alert' );
 		}
-		$this->notify_unopened( $rows, $hours );
+		return (array) $rows;
 	}
 
 	/**
-	 * One text for everything a check_unopened() run flagged: the full
-	 * details for a single email, otherwise a short list.
+	 * Whether check_unopened() runs: open tracking on, plus a channel that
+	 * can deliver. Email always can (notify_email() falls back to the admin
+	 * email); texts need SMS alerts on. With "both" and SMS off, only the
+	 * email goes out.
+	 *
+	 * @param array|null $o Settings to check; null for the saved ones.
+	 */
+	public function unopened_alerts_enabled( $o = null ) {
+		$o = $this->settings( $o );
+		if ( empty( $o['track_opens'] ) ) {
+			return false;
+		}
+		return 'sms' !== $this->unopened_channel( $o ) || $this->sms_enabled( $o );
+	}
+
+	/**
+	 * How unopened alerts are sent: 'sms', 'email' or 'both'. Defaults to
+	 * 'sms', which is all there was before the choice existed.
+	 *
+	 * @param array|null $o Settings to check; null for the saved ones.
+	 */
+	public function unopened_channel( $o = null ) {
+		$o       = $this->settings( $o );
+		$channel = isset( $o['unopened_channel'] ) ? $o['unopened_channel'] : 'sms';
+		return in_array( $channel, array( 'sms', 'email', 'both' ), true ) ? $channel : 'sms';
+	}
+
+	/**
+	 * Flags every delivered, unopened email already in the log as alerted,
+	 * so the next check_unopened() run only covers emails sent from now on.
+	 * Used when unopened alerts start running (older emails were either sent
+	 * without the pixel, so they'd all look unopened, or went unchecked
+	 * while alerts were off) and on the upgrade that turned unopened alerts
+	 * on for every site with SMS + open tracking. Skips the secondary notice
+	 * for them too.
+	 */
+	public function skip_unopened_backlog() {
+		global $wpdb;
+		$table = self::table();
+		$wpdb->query( "UPDATE {$table} SET unopened_alerted = 2 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted < 2" );
+	}
+
+	/**
+	 * Skips the secondary notice for emails that already had their first
+	 * alert and are past the secondary threshold, so switching the notice
+	 * on doesn't text about every older unopened email at once. Emails still
+	 * short of the threshold get theirs as usual.
+	 *
+	 * @param int $hours The secondary threshold being saved.
+	 */
+	public function skip_second_unopened_backlog( $hours ) {
+		global $wpdb;
+		$table  = self::table();
+		$cutoff = $this->local_mysql_time( time() - $hours * HOUR_IN_SECONDS );
+		$wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET unopened_alerted = 2 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = 1 AND created_at <= %s",
+				$cutoff
+			)
+		);
+	}
+
+	/**
+	 * One alert for everything a check_unopened() pass flagged: the full
+	 * details for a single email, otherwise a short list. Sent as a text,
+	 * an email or both, per unopened_channel().
 	 *
 	 * @param object[] $rows
 	 * @param int      $hours
+	 * @param bool     $second Whether these are secondary notices.
 	 */
-	private function notify_unopened( $rows, $hours ) {
+	private function notify_unopened( $rows, $hours, $second = false ) {
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
 		$link = admin_url( 'admin.php?page=wpel-log&status=delivered' );
+		$tag  = $second ? ' (2nd notice)' : '';
 
 		if ( 1 === count( $rows ) ) {
 			$row  = $rows[0];
@@ -1058,9 +1192,11 @@ class WPEL_Mailgun_Monitor {
 				$from .= "\n";
 			}
 			$text = sprintf(
-				"%s - unopened after %dh\nTo: %s\nSubject: %s\n%sDelivered: %s\n%s",
+				"%s - %sunopened after %dh%s\nTo: %s\nSubject: %s\n%sDelivered: %s\n%s",
 				$host,
+				$second ? 'still ' : '',
 				$hours,
+				$tag,
 				$row->recipient,
 				$row->subject,
 				$from,
@@ -1069,7 +1205,7 @@ class WPEL_Mailgun_Monitor {
 			);
 		} else {
 			$shown = 5;
-			$text  = sprintf( "%s - %d emails unopened after %dh\n", $host, count( $rows ), $hours );
+			$text  = sprintf( "%s - %d emails %sunopened after %dh%s\n", $host, count( $rows ), $second ? 'still ' : '', $hours, $tag );
 			foreach ( array_slice( $rows, 0, $shown ) as $row ) {
 				$text .= sprintf( "- %s: %s\n", $row->recipient, $row->subject );
 			}
@@ -1082,7 +1218,21 @@ class WPEL_Mailgun_Monitor {
 		// Slack — disabled for now, see notify_slack() and the note in handle_failure().
 		// $this->notify_slack( $text );
 
-		$this->notify_twilio( $text );
+		$channel = $this->unopened_channel();
+		if ( 'email' !== $channel ) {
+			$this->notify_twilio( $text );
+		}
+		if ( 'sms' !== $channel ) {
+			$this->notify_email(
+				sprintf(
+					'[Mailgun Watch] %s%s on %s',
+					1 === count( $rows ) ? 'Unopened email' : count( $rows ) . ' unopened emails',
+					$tag,
+					$host
+				),
+				$text
+			);
+		}
 	}
 
 	/**

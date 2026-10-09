@@ -63,6 +63,25 @@ class WPEL_Activator {
 		self::create_or_upgrade_table();
 		update_option( 'wpel_db_version', WPEL_VERSION, false );
 		self::ensure_cron_scheduled();
+		self::drop_alert_unopened();
+	}
+
+	/**
+	 * Unopened alerts used to have their own checkbox (alert_unopened); they
+	 * now just follow SMS alerts + open tracking. On a site that had the
+	 * checkbox off, skip the emails already in the log, so the first run
+	 * after updating doesn't text about every old unopened email at once.
+	 */
+	private static function drop_alert_unopened() {
+		$o = get_option( WPEL_OPTION, array() );
+		if ( ! is_array( $o ) || ! array_key_exists( 'alert_unopened', $o ) ) {
+			return;
+		}
+		if ( empty( $o['alert_unopened'] ) ) {
+			WPEL_Mailgun_Monitor::instance()->skip_unopened_backlog();
+		}
+		unset( $o['alert_unopened'] );
+		update_option( WPEL_OPTION, $o );
 	}
 
 	private static function ensure_cron_scheduled() {
@@ -116,11 +135,16 @@ class WPEL_Activator {
 			'alert_temp_fail'  => 0,
 			'outage_threshold' => 5,
 			'outage_window'    => 15, // minutes
-			'alert_unopened'   => 0,
+			// Unopened alerts run whenever track_opens is on and the channel
+			// ('sms', 'email' or 'both') can deliver; texts need SMS alerts on.
 			'unopened_hours'   => 24,
-			// 'all' delivered emails, or only the 'selected' sources in
-			// unopened_watch (source => page id, 0 = any page); see WPEL_Sources.
-			'unopened_scope'   => 'all',
+			'unopened_channel' => 'sms',
+			// Second text for emails still unopened unopened_second_hours
+			// after sending (always later than unopened_hours).
+			'unopened_second'       => 0,
+			'unopened_second_hours' => 48,
+			// Sources unopened alerts are limited to (source => page id, 0 =
+			// any page); see WPEL_Sources. Empty = no unopened alerts.
 			'unopened_watch'   => array(),
 		);
 		$existing = get_option( WPEL_OPTION, array() );
