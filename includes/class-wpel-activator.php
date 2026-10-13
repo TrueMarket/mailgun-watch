@@ -64,6 +64,28 @@ class WPEL_Activator {
 		update_option( 'wpel_db_version', WPEL_VERSION, false );
 		self::ensure_cron_scheduled();
 		self::drop_alert_unopened();
+		self::drop_unopened_channel();
+	}
+
+	/**
+	 * Unopened alerts used to have a "Send by" choice (unopened_channel);
+	 * they now go by text with SMS alerts on, otherwise by email, so they run
+	 * whenever open tracking is on. A site that had "Text message" picked
+	 * with SMS off wasn't running the check at all: skip the emails already
+	 * in the log there, so the first run doesn't alert about every old
+	 * unopened email at once.
+	 */
+	private static function drop_unopened_channel() {
+		$o = get_option( WPEL_OPTION, array() );
+		if ( ! is_array( $o ) || ! array_key_exists( 'unopened_channel', $o ) ) {
+			return;
+		}
+		$monitor = WPEL_Mailgun_Monitor::instance();
+		if ( ! empty( $o['track_opens'] ) && 'sms' === $o['unopened_channel'] && ! $monitor->sms_enabled( $o ) ) {
+			$monitor->skip_unopened_backlog();
+		}
+		unset( $o['unopened_channel'] );
+		update_option( WPEL_OPTION, $o );
 	}
 
 	/**
@@ -135,19 +157,25 @@ class WPEL_Activator {
 			'alert_temp_fail'  => 0,
 			'outage_threshold' => 5,
 			'outage_window'    => 15, // minutes
-			// Unopened alerts run whenever track_opens is on and the channel
-			// ('sms', 'email' or 'both') can deliver; texts need SMS alerts on.
+			// Unopened alerts run whenever track_opens is on, by text with
+			// SMS alerts on, otherwise by email.
 			'unopened_hours'   => 24,
-			'unopened_channel' => 'sms',
 			// Second text for emails still unopened unopened_second_hours
 			// after sending (always later than unopened_hours).
 			'unopened_second'       => 0,
 			'unopened_second_hours' => 48,
-			// Sources unopened alerts are limited to (source => page id, 0 =
-			// any page); see WPEL_Sources. Empty = no unopened alerts.
-			'unopened_watch'   => array(),
+			// "Watched emails" (a list of sources, see WPEL_Sources): texted as
+			// soon as they're sent (needs SMS alerts on), and the only emails
+			// unopened alerts cover. Empty = neither kind of alert.
+			'watched_sources'  => array(),
 		);
 		$existing = get_option( WPEL_OPTION, array() );
+		if ( is_array( $existing ) && ! isset( $existing['watched_sources'] ) ) {
+			// Fold the older unopened_watch/submission_watch lists in, rather
+			// than letting the empty default above replace them.
+			$existing['watched_sources'] = WPEL_Sources::watched( $existing );
+			unset( $existing['unopened_watch'], $existing['submission_watch'] );
+		}
 		if ( is_array( $existing ) && isset( $existing['force_from'] ) ) {
 			// Carry the old combined "Force from address" over to both halves,
 			// rather than letting the defaults above switch it back on.

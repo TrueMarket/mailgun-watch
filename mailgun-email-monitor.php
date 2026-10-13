@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Mailgun Watch
+ * Plugin Name: Form Alert
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.13
+ * Version:     2.2.14
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -11,7 +11,7 @@
  * ------------------------------------------------------------------------
  * NAMING NOTE: this plugin was originally called "Mailgun Email Monitor"
  * (before that, just a "WP Email Log" tool — hence "WPEL"), and was renamed
- * to "Mailgun Watch" for a punchier name. The "wpel" prefix lives on
+ * to "Mailgun Watch" for a punchier name, then to "Form Alert". The "wpel" prefix lives on
  * throughout the code (class names, the wpel_settings option, the
  * wpel_email_log DB table, hooks, the wp-json/wpel/v1 REST route, file
  * names) purely for internal/historical reasons — changing it would risk
@@ -77,15 +77,20 @@
  *   - If failures pile up with no successful sends in the window, a distinct
  *     "ALL EMAIL MAY BE DOWN" alarm is texted (throttled), because in that
  *     scenario the alert email itself cannot get out.
- *   - UNOPENED SWEEP (on whenever open tracking above is enabled and the
- *     chosen channel can deliver; no separate switch): an hourly cron (wpel_check_unopened) flags any 'delivered' row
+ *   - UNOPENED SWEEP (on whenever open tracking above is enabled; no
+ *     separate switch): an hourly cron (wpel_check_unopened) flags any 'delivered' row
  *     that still has open_count = 0 past a configurable number of hours, and
- *     flags each row once, in one summary alert per run, sent by text, email
- *     or both (see check_unopened() in
+ *     flags each row once, in one summary alert per run, sent by text with
+ *     SMS alerts on, otherwise by email (see check_unopened() in
  *     includes/class-wpel-monitor.php). An optional secondary notice alerts
- *     again for rows still unopened past a second, later threshold. It can be limited to chosen sources,
- *     e.g. one Forminator notification or HTML Forms email action, optionally only from one
- *     page: every row records what sent it (see includes/class-wpel-sources.php).
+ *     again for rows still unopened past a second, later threshold. It only covers
+ *     the sources ticked under "Watched emails", e.g. one Forminator notification
+ *     or HTML Forms email action: every row records what sent it (see
+ *     includes/class-wpel-sources.php).
+ *   - SUBMISSION TEXTS (needs SMS alerts): an email from a source ticked
+ *     under "Watched emails" (the same list the unopened sweep covers) is
+ *     texted as soon as it's captured, before it's sent, so a new form lead
+ *     is seen right away. See notify_submission().
  *   - Slack support still exists in the code (notify_slack() in
  *     class-wpel-monitor.php) but every call site is currently commented out
  *     in favor of Twilio SMS. Uncomment them to re-enable it alongside SMS.
@@ -121,7 +126,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.13' );
+define( 'WPEL_VERSION', '2.2.14' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

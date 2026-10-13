@@ -1,16 +1,26 @@
-=== Mailgun Watch ===
+=== Form Alert ===
 Contributors: jimlaroche
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Stable tag: 2.2.13
+Stable tag: 2.2.14
 
 Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, reconciles delivery via Mailgun webhooks, and alerts on failure.
 
 == Description ==
 
-Mailgun Watch replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
+Form Alert replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
 
 == Changelog ==
+
+= 2.2.14 =
+* Renamed the plugin from Mailgun Watch to Form Alert, including the admin menu, alert and test email subjects; failure alerts sent under the old name were still ignored by the webhook
+* Added the Form Alert logo to the Settings and Email Log pages
+* Added submission texts: with SMS alerts on, each watched email was texted to the alert numbers as soon as it was sent
+* Merged the unopened-alert and submission lists into one "Watched emails" list, with forms on the General tab and other sources on Alerting & Logging; existing selections carried over
+* Removed the per-page limit on watched emails
+* Removed the unopened alerts "Send by" choice; they went by text with SMS alerts on, otherwise by email
+* Simplified the General tab: alert phone numbers only showed with SMS alerts on, unopened settings moved under Track opens, and the overview was rewritten
+* Updated the README to match
 
 = 2.2.13 =
 * Added a client-facing General tab for alert email, SMS alerts, alert phone numbers and open tracking; Twilio settings stayed on Alerting & Logging and were always shown

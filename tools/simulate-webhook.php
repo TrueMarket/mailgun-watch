@@ -28,7 +28,7 @@ if ( ! defined( 'WP_CLI' ) || ! WP_CLI ) {
 }
 
 if ( ! class_exists( 'WPEL_Mailgun_Monitor' ) ) {
-	WP_CLI::error( 'Mailgun Watch is not active on this site.' );
+	WP_CLI::error( 'Form Alert is not active on this site.' );
 }
 
 global $wpdb;
@@ -258,7 +258,7 @@ if ( $created_row && $opts['cleanup'] ) {
 	$wpdb->delete( $table, array( 'id' => $row_id ) );
 	WP_CLI::log( "Deleted fake row #{$row_id}." );
 } elseif ( $created_row ) {
-	WP_CLI::log( "Fake row #{$row_id} kept so you can see it in Mailgun Watch → Email Log (add \"cleanup\" to delete it automatically)." );
+	WP_CLI::log( "Fake row #{$row_id} kept so you can see it in Form Alert → Email Log (add \"cleanup\" to delete it automatically)." );
 }
 
 $failed = count( array_filter( $results, function ( $ok ) { return ! $ok; } ) );

@@ -96,11 +96,11 @@ class WPEL_Admin {
 		$out['outage_threshold'] = max( 1, (int) ( isset( $input['outage_threshold'] ) ? $input['outage_threshold'] : 5 ) );
 		$out['outage_window']    = max( 1, (int) ( isset( $input['outage_window'] ) ? $input['outage_window'] : 15 ) );
 		$out['unopened_hours']   = max( 1, (int) ( isset( $input['unopened_hours'] ) ? $input['unopened_hours'] : 24 ) );
-		$out['unopened_channel'] = ( isset( $input['unopened_channel'] ) && in_array( $input['unopened_channel'], array( 'sms', 'email', 'both' ), true ) ) ? $input['unopened_channel'] : 'sms';
 		$out['unopened_second']  = ! empty( $input['unopened_second'] ) ? 1 : 0;
 		// The secondary notice always comes after the first alert.
 		$out['unopened_second_hours'] = max( $out['unopened_hours'] + 1, (int) ( isset( $input['unopened_second_hours'] ) ? $input['unopened_second_hours'] : 48 ) );
-		$out['unopened_watch']   = $this->sanitize_unopened_watch( $input );
+		// "Watched emails": texted when sent (SMS alerts) and alerted if unopened (Track opens).
+		$out['watched_sources']  = $this->sanitize_watch( $input );
 
 		// A previously-passing webhook check or test send no longer proves
 		// anything once the API key or domain they were run against changes.
@@ -132,25 +132,18 @@ class WPEL_Admin {
 		return $out;
 	}
 
-	/**
-	 * The ticked sources for the unopened alert, as source => page id. Each
-	 * source takes its page from its group's picker (one per form, shared by
-	 * that form's emails); see WPEL_Sources::group_key().
-	 */
-	private function sanitize_unopened_watch( $input ) {
-		$sources = isset( $input['unopened_sources'] ) ? (array) $input['unopened_sources'] : array();
-		$pages   = isset( $input['unopened_page'] ) && is_array( $input['unopened_page'] ) ? $input['unopened_page'] : array();
+	/** The sources ticked under "Watched emails", as a list. */
+	private function sanitize_watch( $input ) {
+		$sources = isset( $input['watched_sources'] ) ? (array) $input['watched_sources'] : array();
 
 		$out = array();
 		foreach ( $sources as $source ) {
 			$source = WPEL_Sources::clean( wp_unslash( $source ) );
-			if ( '' === $source ) {
-				continue;
+			if ( '' !== $source ) {
+				$out[] = $source;
 			}
-			$group          = WPEL_Sources::group_key( $source );
-			$out[ $source ] = isset( $pages[ $group ] ) ? absint( $pages[ $group ] ) : 0;
 		}
-		return $out;
+		return array_values( array_unique( $out ) );
 	}
 
 	/**
@@ -335,8 +328,8 @@ class WPEL_Admin {
 
 		$sent = wp_mail(
 			$to,
-			'[Mailgun Watch] Test email from ' . wp_parse_url( home_url(), PHP_URL_HOST ),
-			"This is a test email sent from the Mailgun Watch settings page at " . current_time( 'mysql' ) . " via " . $this->transport_label( $via ) . " to confirm sending is working.\n\nCheck the Email Log to see how it was recorded."
+			'[Form Alert] Test email from ' . wp_parse_url( home_url(), PHP_URL_HOST ),
+			"This is a test email sent from the Form Alert settings page at " . current_time( 'mysql' ) . " via " . $this->transport_label( $via ) . " to confirm sending is working.\n\nCheck the Email Log to see how it was recorded."
 		);
 
 		// Sticky: once a test send has succeeded, the checklist stays checked
@@ -403,7 +396,7 @@ class WPEL_Admin {
 
 		$results = WPEL_Mailgun_Monitor::instance()->send_test_sms(
 			sprintf(
-				'[Mailgun Watch] Test SMS from %s at %s',
+				'[Form Alert] Test SMS from %s at %s',
 				wp_parse_url( home_url(), PHP_URL_HOST ),
 				current_time( 'mysql' )
 			)
@@ -691,8 +684,8 @@ class WPEL_Admin {
 
 	public function admin_menu() {
 		add_menu_page(
-			'Mailgun Watch',
-			'Mailgun Watch',
+			'Form Alert',
+			'Form Alert',
 			'manage_options',
 			'wpel-log',
 			array( $this, 'render_log_page' ),
@@ -715,10 +708,10 @@ class WPEL_Admin {
 		$smtp_encryption = isset( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
 		$sms_enabled     = WPEL_Mailgun_Monitor::instance()->sms_enabled();
 		$track_opens     = ! empty( $o['track_opens'] );
-		$unopened_channel = WPEL_Mailgun_Monitor::instance()->unopened_channel( $o );
 		$unopened_second = ! empty( $o['unopened_second'] );
 		?>
 		<div class="wrap">
+			<?php $this->render_logo(); ?>
 			<h1>Settings</h1>
 
 			<?php settings_errors( WPEL_OPTION ); ?>
@@ -738,12 +731,13 @@ class WPEL_Admin {
 				<?php // Client-facing: everyday settings in plain language. The technical setup lives on the other two tabs. ?>
 				<div id="wpel-tab-general" class="wpel-tab-panel">
 					<div class="wpel-intro">
-						<p><strong>Mailgun Watch makes sure the emails your website sends actually arrive</strong>, such as contact form messages and order notifications.</p>
+						<p><strong>Form Alert makes sure the emails your website sends, like contact form messages, actually arrive.</strong> It keeps track of every email and lets you know right away when something goes wrong, so no enquiry slips through the cracks.</p>
 						<ul>
-							<li>Every email your website sends is recorded in the <a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>">Log</a>, along with whether it was delivered.</li>
-							<li>If an email can't be delivered, you get an alert by email, and by text message if you turn that on below.</li>
-							<li>If your website stops sending email altogether, a text message lets you know, even though email can't get through.</li>
-							<li>You can also get an alert by text, email or both when an important email, like a new enquiry, hasn't been opened.</li>
+							<li>Every email is recorded in the <a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>">Log</a>, showing whether it was delivered and, with Track opens on, whether it was opened.</li>
+							<li>If an email can't be delivered, you get an alert by email, and by text with SMS alerts on.</li>
+							<li>If your website stops sending email altogether, a text lets you know, even though email can't get through.</li>
+							<li>Get a text the moment someone submits one of your watched forms.</li>
+							<li>Get an alert if a watched form's email still hasn't been opened after a set number of hours.</li>
 						</ul>
 					</div>
 
@@ -760,9 +754,9 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">SMS alerts</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working.</p></td>
+							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working. You'll also get a text each time one of the emails ticked under "Watched emails" below is sent.</p></td>
 						</tr>
-						<tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
 							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
@@ -774,29 +768,20 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">Track opens</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[track_opens]" id="wpel_track_opens" value="1" <?php checked( $track_opens ); ?>> Track when emails are opened</label>
-							<p class="description">Shows in the Log whether each email was opened. Treat it as a good hint, not a guarantee: some email apps open emails automatically. Turning this on also lets you get an alert when an important email hasn't been opened.</p></td>
+							<p class="description">Shows in the Log whether each email was opened. Treat it as a good hint, not a guarantee: some email apps open emails automatically.</p>
+							<div class="wpel-unopened-row"<?php echo $track_opens ? '' : ' style="display:none"'; ?>>
+								<p><label for="wpel_unopened_hours">Alert me if a watched email isn't opened within</label>
+								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" id="wpel_unopened_hours" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours</p>
+								<?php // The second threshold counts from sending too; sanitize_settings() keeps it above the first. ?>
+								<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second]" value="1" <?php checked( $unopened_second ); ?>> Alert again if it's still unopened after</label>
+								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second_hours]" type="number" min="2" aria-label="Hours before alerting again" value="<?php echo esc_attr( isset( $o['unopened_second_hours'] ) ? $o['unopened_second_hours'] : 48 ); ?>" style="width:70px"> hours</p>
+								<p class="description">Sent by text if SMS alerts are on, otherwise by email to the alert email recipient. Only covers emails sent after open tracking was turned on.</p>
+							</div></td>
 						</tr>
-						<tr class="wpel-unopened-row"<?php echo $track_opens ? '' : ' style="display:none"'; ?>>
-							<th scope="row"><label for="wpel_unopened_hours">Unopened email alerts</label></th>
-							<td>Alert me when a delivered email still hasn't been opened after
-							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_hours]" id="wpel_unopened_hours" type="number" min="1" value="<?php echo esc_attr( isset( $o['unopened_hours'] ) ? $o['unopened_hours'] : 24 ); ?>" style="width:70px"> hours
-							<fieldset style="margin:10px 0 0;">
-								<legend style="float:left;margin-right:12px;">Send by:</legend>
-								<?php foreach ( array( 'sms' => 'Text message', 'email' => 'Email', 'both' => 'Both' ) as $value => $label ) : ?>
-									<label style="margin-right:12px;"><input type="radio" name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_channel]" value="<?php echo esc_attr( $value ); ?>" <?php checked( $unopened_channel, $value ); ?>> <?php echo esc_html( $label ); ?></label>
-								<?php endforeach; ?>
-							</fieldset>
-							<?php // Shown by the script below when the chosen channel includes texts but SMS alerts are off. ?>
-							<p id="wpel-unopened-sms-off" class="description" style="color:#b32d2e;<?php echo ( 'email' !== $unopened_channel && ! $sms_enabled ) ? '' : 'display:none;'; ?>">SMS alerts are turned off above, so no texts will be sent. Turn them on, or choose Email.</p>
-							<p class="description">Emails go to the alert email recipient above. Only covers the emails ticked under "Unopened alerts cover" below, and only those sent after open tracking was turned on.</p>
-							<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second]" id="wpel_unopened_second" value="1" <?php checked( $unopened_second ); ?>> Enable secondary notice</label></p>
-							<p id="wpel-unopened-second-hours"<?php echo $unopened_second ? '' : ' style="display:none"'; ?>>Alert again if it's still unopened after
-							<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[unopened_second_hours]" type="number" min="2" value="<?php echo esc_attr( isset( $o['unopened_second_hours'] ) ? $o['unopened_second_hours'] : 48 ); ?>" style="width:70px"> hours
-							<span class="description">(counted from when the email was sent, so this must be more than the first)</span></p></td>
-						</tr>
-						<tr class="wpel-unopened-row"<?php echo $track_opens ? '' : ' style="display:none"'; ?>>
-							<th scope="row">Unopened alerts cover</th>
-							<td><?php $this->render_unopened_watch( $o ); ?></td>
+						<?php // Only does anything with SMS alerts or Track opens on, so only shown while either is. ?>
+						<tr class="wpel-watch-row"<?php echo ( $track_opens || $sms_enabled ) ? '' : ' style="display:none"'; ?>>
+							<th scope="row">Watched emails</th>
+							<td><?php $watched_forms = $this->render_watch( $o ); ?></td>
 						</tr>
 					</table>
 				</div>
@@ -937,6 +922,12 @@ class WPEL_Admin {
 							</td>
 						</tr>
 					</table>
+
+					<hr style="margin:24px 0;">
+
+					<h2 class="title">Other watched emails</h2>
+					<p class="description">Emails that don't come from a Forminator or HTML Forms form, listed once they've been sent at least once. A ticked one works like a form ticked under "Watched emails" on the General tab: a text when it's sent (with SMS alerts on) and an alert if it isn't opened (with Track opens on).</p>
+					<?php $this->render_other_watch( $o, $watched_forms ); ?>
 				</div>
 
 				<?php submit_button(); ?>
@@ -961,7 +952,7 @@ class WPEL_Admin {
 			#wpel-unopened-watch h4 { margin: 12px 0 6px; }
 			#wpel-unopened-watch h4:first-child { margin-top: 0; }
 			.wpel-watch-group { margin: 0 0 10px; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; }
-			.wpel-watch-group .wpel-watch-source, .wpel-watch-group .wpel-watch-page { display: block; margin-top: 6px; }
+			.wpel-watch-email { display: block; margin-top: 6px; }
 			@media (max-width: 960px) {
 				.wpel-settings-columns { display: block; }
 				.wpel-settings-sidebar { width: auto; margin-top: 24px; }
@@ -1008,48 +999,25 @@ class WPEL_Admin {
 		} )();
 
 		( function () {
-			// The unopened-alert rows only apply with "Track opens" on, so
-			// they're shown only then. Hidden fields still submit, so their
-			// saved values survive toggling it off. Also warns when the chosen
-			// channel includes texts but SMS alerts are off.
+			// The alert phone numbers only apply with SMS alerts on, the
+			// unopened-alert settings with "Track opens" on, and "Watched
+			// emails" with either, so they're shown only then. Hidden fields
+			// still submit, so their saved values survive toggling these off.
 			var sms      = document.getElementById( 'wpel_sms_enabled' );
 			var opens    = document.getElementById( 'wpel_track_opens' );
-			var smsOff   = document.getElementById( 'wpel-unopened-sms-off' );
-			var channels = document.querySelectorAll( 'input[name$="[unopened_channel]"]' );
-			if ( ! sms || ! opens || ! smsOff ) {
+			var smsRow   = document.querySelector( '.wpel-sms-row' );
+			var watchRow = document.querySelector( '.wpel-watch-row' );
+			var unopened = document.querySelector( '.wpel-unopened-row' );
+			if ( ! sms || ! opens || ! smsRow || ! watchRow || ! unopened ) {
 				return;
 			}
-			var rows = document.querySelectorAll( '.wpel-unopened-row' );
 			function sync() {
-				rows.forEach( function ( r ) {
-					r.style.display = opens.checked ? '' : 'none';
-				} );
-				var channel = 'sms';
-				channels.forEach( function ( c ) {
-					if ( c.checked ) {
-						channel = c.value;
-					}
-				} );
-				smsOff.style.display = 'email' !== channel && ! sms.checked ? '' : 'none';
+				smsRow.style.display   = sms.checked ? '' : 'none';
+				unopened.style.display = opens.checked ? '' : 'none';
+				watchRow.style.display = opens.checked || sms.checked ? '' : 'none';
 			}
 			sms.addEventListener( 'change', sync );
 			opens.addEventListener( 'change', sync );
-			channels.forEach( function ( c ) {
-				c.addEventListener( 'change', sync );
-			} );
-		} )();
-
-		( function () {
-			// "Enable secondary notice" shows/hides its hours field. Like the
-			// unopened rows, the hidden field still submits.
-			var toggle = document.getElementById( 'wpel_unopened_second' );
-			var hours  = document.getElementById( 'wpel-unopened-second-hours' );
-			if ( ! toggle || ! hours ) {
-				return;
-			}
-			toggle.addEventListener( 'change', function () {
-				hours.style.display = toggle.checked ? '' : 'none';
-			} );
 		} )();
 
 		( function () {
@@ -1151,113 +1119,93 @@ class WPEL_Admin {
 		if ( '' === trim( $name ) ) {
 			$name = wp_parse_url( home_url(), PHP_URL_HOST );
 		}
-		return $name . ' - Mailgun Watch';
+		return $name . ' - Form Alert';
 	}
 
 	/**
-	 * "Unopened alerts cover" setting: the sources unopened alerts are
-	 * limited to. Lists each form plugin's forms with the emails each
-	 * sends (Forminator notifications, HTML Forms "Send Email" actions), so
-	 * the email to the business can be watched without the visitor's
-	 * auto-reply, then any other source seen in the log. Each form, or other
-	 * source, gets an optional page picker.
+	 * "Watched emails" setting on the General tab: one tick per email, which
+	 * gets a text as soon as it's sent (SMS alerts on) and an alert if it
+	 * goes unopened (Track opens on). Lists each form plugin's forms with the
+	 * emails each sends (Forminator notifications, HTML Forms "Send Email"
+	 * actions), so the email to the business can be watched without the
+	 * visitor's auto-reply. Every other source is ticked on the Alerting &
+	 * Logging tab instead; see render_other_watch().
+	 *
+	 * @return string[] The sources listed, for render_other_watch() to skip.
 	 */
-	private function render_unopened_watch( $o ) {
-		$sources  = WPEL_Sources::instance();
-		$watch    = ! empty( $o['unopened_watch'] ) && is_array( $o['unopened_watch'] ) ? $o['unopened_watch'] : array();
-		$name     = esc_attr( WPEL_OPTION );
-		$rendered = array();
-
-		// Saved page per picker group.
-		$group_pages = array();
-		foreach ( $watch as $source => $page ) {
-			if ( $page ) {
-				$group_pages[ WPEL_Sources::group_key( $source ) ] = (int) $page;
-			}
-		}
-
-		$page_picker = function ( $group, $pages, $label ) use ( $name, $group_pages ) {
-			$current = isset( $group_pages[ $group ] ) ? $group_pages[ $group ] : 0;
-			if ( $current && ! isset( $pages[ $current ] ) ) {
-				$pages[ $current ] = WPEL_Sources::page_title( $current );
-			}
-			if ( ! $pages ) {
-				return;
-			}
-			?>
-			<label class="wpel-watch-page"><?php echo esc_html( $label ); ?>
-				<select name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_page][<?php echo esc_attr( $group ); ?>]">
-					<option value="0">any page</option>
-					<?php foreach ( $pages as $id => $title ) : ?>
-						<option value="<?php echo (int) $id; ?>" <?php selected( $current, $id ); ?>><?php echo esc_html( $title ); ?></option>
-					<?php endforeach; ?>
-				</select>
-			</label>
-			<?php
-		};
-
-		$checkbox = function ( $source, $label, $hint = '' ) use ( $name, $watch, &$rendered ) {
-			$rendered[ $source ] = true;
-			?>
-			<label class="wpel-watch-source">
-				<input type="checkbox" name="<?php echo $name; // phpcs:ignore WordPress.Security.EscapeOutput -- esc_attr()'d above ?>[unopened_sources][]" value="<?php echo esc_attr( $source ); ?>" <?php checked( isset( $watch[ $source ] ) ); ?>>
-				<?php echo esc_html( $label ); ?>
-				<?php if ( '' !== $hint ) : ?>
-					<span class="description">&rarr; <?php echo esc_html( $hint ); ?></span>
-				<?php endif; ?>
-			</label>
-			<?php
-		};
+	private function render_watch( $o ) {
+		$plugins = WPEL_Sources::instance()->form_plugins();
+		$listed  = array();
 		?>
 		<div id="wpel-unopened-watch">
-			<?php foreach ( $sources->form_plugins() as $plugin ) : ?>
+			<?php if ( ! $plugins ) : ?>
+				<p class="description">No supported form plugin (Forminator or HTML Forms) is active.</p>
+			<?php endif; ?>
+			<?php foreach ( $plugins as $plugin ) : ?>
 				<h4><?php echo esc_html( $plugin['name'] ); ?> forms</h4>
 				<?php if ( ! $plugin['forms'] ) : ?>
 					<p class="description">No <?php echo esc_html( $plugin['name'] ); ?> forms yet.</p>
 				<?php endif; ?>
 				<?php foreach ( $plugin['forms'] as $form ) : ?>
 					<div class="wpel-watch-group">
-						<strong><?php echo esc_html( $form['name'] ); ?></strong> <span class="description">#<?php echo (int) $form['id']; ?></span>
+						<strong><?php echo esc_html( $form['name'] ); ?></strong>
 						<?php if ( ! $form['emails'] ) : ?>
 							<p class="description">This form doesn't send any emails.</p>
 						<?php endif; ?>
 						<?php
 						foreach ( $form['emails'] as $email ) {
-							$checkbox( $email['source'], $email['label'], $email['recipients'] );
-						}
-						if ( $form['emails'] ) {
-							$page_picker( $form['group'], $sources->form_pages( $form['group'] ), 'Only when submitted on' );
+							$this->render_watch_checkbox( $o, $email['source'], $email['label'], $email['recipients'] );
+							$listed[] = $email['source'];
 						}
 						?>
 					</div>
 				<?php endforeach; ?>
 			<?php endforeach; ?>
+			<?php if ( $plugins ) : ?>
+				<p class="description">Tick the emails you want to keep a close eye on. For a form, tick just the email that goes to your team, not the confirmation sent to the visitor, or you'll get two texts per submission.</p>
+			<?php endif; ?>
+		</div>
+		<?php
+		return $listed;
+	}
 
+	/**
+	 * The rest of "Watched emails", on the Alerting & Logging tab: every
+	 * other source the log has seen, plus anything still ticked that
+	 * render_watch() didn't list (a deleted form, or its plugin deactivated),
+	 * so saving the page doesn't silently drop it.
+	 *
+	 * @param string[] $listed Sources render_watch() already listed.
+	 */
+	private function render_other_watch( $o, $listed ) {
+		$sources = WPEL_Sources::instance();
+		$others  = array_diff( array_unique( array_merge( $sources->logged_sources(), WPEL_Sources::watched( $o ) ) ), $listed );
+		sort( $others );
+		if ( ! $others ) {
+			echo '<p>Nothing else has been sent yet.</p>';
+			return;
+		}
+		?>
+		<div class="wpel-watch-group">
 			<?php
-			// Everything else the log has seen, plus anything still ticked that
-			// isn't listed above (a deleted form, or its plugin deactivated), so
-			// saving the page doesn't silently drop it.
-			$others = $sources->logged_sources();
-			foreach ( array_keys( $watch ) as $source ) {
-				if ( ! isset( $rendered[ $source ] ) && ! isset( $others[ $source ] ) ) {
-					$others[ $source ] = array();
-				}
+			foreach ( $others as $source ) {
+				$this->render_watch_checkbox( $o, $source, $sources->label( $source ) );
 			}
 			?>
-			<?php if ( $others ) : ?>
-				<h4>Other sources seen in the log</h4>
-				<?php foreach ( $others as $source => $pages ) : ?>
-					<div class="wpel-watch-group">
-						<?php
-						$checkbox( $source, $sources->label( $source ) );
-						$page_picker( WPEL_Sources::group_key( $source ), $pages, 'Only from' );
-						?>
-					</div>
-				<?php endforeach; ?>
-			<?php endif; ?>
-
-			<p class="description">Tick the emails you want an alert about if they go unopened. For a form, tick just the email that goes to your team, not the confirmation sent to the visitor. If nothing is ticked, no unopened alerts are sent. Other emails only appear under "Other sources" after they've been sent at least once. HTML Forms emails are numbered in the order they appear in the form's settings, so reordering or removing one changes which one is ticked.</p>
 		</div>
+		<?php
+	}
+
+	/** One "Watched emails" tick, with an optional hint (e.g. the recipients) after the label. */
+	private function render_watch_checkbox( $o, $source, $label, $hint = '' ) {
+		?>
+		<label class="wpel-watch-email">
+			<input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[watched_sources][]" value="<?php echo esc_attr( $source ); ?>" <?php checked( in_array( (string) $source, WPEL_Sources::watched( $o ), true ) ); ?>>
+			<?php echo esc_html( $label ); ?>
+			<?php if ( '' !== $hint ) : ?>
+				<span class="description">&rarr; <?php echo esc_html( $hint ); ?></span>
+			<?php endif; ?>
+		</label>
 		<?php
 	}
 
@@ -1511,6 +1459,15 @@ class WPEL_Admin {
 		return array_merge( $args, array( 'wpel_bulk', 'wpel_done', 'wpel_skipped', 'wpel_failed' ) );
 	}
 
+	/** Brand logo shown above the page title on the plugin's admin screens. */
+	private function render_logo() {
+		?>
+		<div class="wpel-logo" style="margin: 16px 0 8px;">
+			<img src="<?php echo esc_url( plugins_url( 'admin/images/logo.png', WPEL_FILE ) . '?ver=' . WPEL_VERSION ); ?>" alt="True Market - Form Alert" style="display: block; width: 250px; max-width: 100%; height: auto;">
+		</div>
+		<?php
+	}
+
 	private function log_bulk_notice() {
 		if ( empty( $_GET['wpel_bulk'] ) ) {
 			return;
@@ -1604,6 +1561,7 @@ class WPEL_Admin {
 		$logged_sources = $sources->all_logged_sources();
 		?>
 		<div class="wrap">
+			<?php $this->render_logo(); ?>
 			<h1>Email Log</h1>
 			<?php $this->log_bulk_notice(); ?>
 			<ul class="subsubsub">

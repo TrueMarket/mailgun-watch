@@ -24,7 +24,10 @@ class WPEL_Mailgun_Monitor {
 	const ALERT_VARIABLE = 'wpel_alert';
 
 	/** Subject prefix of our failure alert emails, see handle_failure(). */
-	const ALERT_SUBJECT_PREFIX = '[Mailgun Watch] Send failure on ';
+	const ALERT_SUBJECT_PREFIX = '[Form Alert] Send failure on ';
+
+	/** Alert subject prefix from before the rename to Form Alert, still matched by handle_webhook(). */
+	const LEGACY_ALERT_SUBJECT_PREFIX = '[Mailgun Watch] Send failure on ';
 
 	/** Option key holding recent-failure timestamps used for outage detection. */
 	const FAILWIN_OPTION = 'wpel_recent_failures';
@@ -170,6 +173,8 @@ class WPEL_Mailgun_Monitor {
 				'source_page' => $source['page'],
 			)
 		);
+
+		$this->notify_submission( $this->last_row_id, $to, isset( $args['subject'] ) ? $args['subject'] : '', $source );
 
 		return $args;
 	}
@@ -430,7 +435,7 @@ class WPEL_Mailgun_Monitor {
 		// raise another alert email — which, if the alert address is bouncing,
 		// fails too, endlessly. The subject check covers alerts sent before the
 		// ALERT_VARIABLE tag existed.
-		if ( ! empty( $event['user-variables'][ self::ALERT_VARIABLE ] ) || 0 === strpos( $subject, self::ALERT_SUBJECT_PREFIX ) ) {
+		if ( ! empty( $event['user-variables'][ self::ALERT_VARIABLE ] ) || 0 === strpos( $subject, self::ALERT_SUBJECT_PREFIX ) || 0 === strpos( $subject, self::LEGACY_ALERT_SUBJECT_PREFIX ) ) {
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'alert email' ), 200 );
 		}
 
@@ -811,24 +816,26 @@ class WPEL_Mailgun_Monitor {
 	 *
 	 * @param string $body
 	 * @param bool   $bypass_limit Send even past the hourly limit (still counted).
+	 * @return bool Whether the text was handed to Twilio (false: SMS off,
+	 *              not configured, or over the hourly limit).
 	 */
 	private function notify_twilio( $body, $bypass_limit = false ) {
 		if ( ! $this->sms_enabled() ) {
-			return;
+			return false;
 		}
 		$creds = $this->get_twilio_credentials();
 		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
-			return;
+			return false;
 		}
 		$to_numbers = array_filter( array_map( 'trim', explode( ',', $this->opt( 'twilio_to_numbers', '' ) ) ) );
 		if ( ! $to_numbers ) {
-			return;
+			return false;
 		}
 
 		// Trimmed before the limit notes are added, so they can't be cut off.
 		$body = $this->apply_sms_limit( mb_substr( $body, 0, 1300 ), $bypass_limit );
 		if ( null === $body ) {
-			return;
+			return false;
 		}
 
 		foreach ( $to_numbers as $to ) {
@@ -848,6 +855,7 @@ class WPEL_Mailgun_Monitor {
 				)
 			);
 		}
+		return true;
 	}
 
 	/**
@@ -994,6 +1002,46 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/* -------------------------------------------------------------------- */
+	/* Submission texts                                                      */
+	/* -------------------------------------------------------------------- */
+
+	/**
+	 * Texts the alert numbers as soon as an email ticked under "Watched
+	 * emails" (WPEL_Sources::watched()) is about to go out, typically a form's
+	 * notification to the team, so a new lead is seen without waiting for the
+	 * email. Needs SMS alerts on. Runs before the send, so the text still
+	 * goes out if the email then fails (which alerts separately). Counts
+	 * toward the hourly text limit like any other alert.
+	 *
+	 * @param int    $row_id Log row just created for this email.
+	 * @param string $to
+	 * @param string $subject
+	 * @param array  $source From WPEL_Sources::current().
+	 */
+	private function notify_submission( $row_id, $to, $subject, $source ) {
+		if ( ! $row_id || ! $this->sms_enabled() || ! WPEL_Sources::is_watched( $source['source'] ) ) {
+			return;
+		}
+
+		$sources = WPEL_Sources::instance();
+		$text    = sprintf(
+			"%s - %s\n%s: %s\n%sEmail to: %s\nSubject: %s\n%s",
+			wp_parse_url( home_url(), PHP_URL_HOST ),
+			WPEL_Sources::is_form( $source['source'] ) ? 'new form submission' : 'watched email sent',
+			WPEL_Sources::is_form( $source['source'] ) ? 'Form' : 'From',
+			$sources->label( $source['source'] ),
+			$source['page'] ? 'Page: ' . WPEL_Sources::page_title( $source['page'] ) . "\n" : '',
+			$to,
+			$subject,
+			admin_url( 'admin.php?page=wpel-log' )
+		);
+
+		if ( $this->notify_twilio( $text ) ) {
+			$this->update_row( $row_id, array(), 'submission_text' );
+		}
+	}
+
+	/* -------------------------------------------------------------------- */
 	/* Unopened-email sweep                                                  */
 	/* -------------------------------------------------------------------- */
 
@@ -1004,20 +1052,19 @@ class WPEL_Mailgun_Monitor {
 	 * a single text per stage however many rows it flags, so a busy site
 	 * can't turn one run into a flood of texts.
 	 *
-	 * Only rows from the ticked sources (WPEL_Sources::watched()) count. The
+	 * Only rows from the sources ticked under "Watched emails" (WPEL_Sources::watched()) count. The
 	 * filter is applied here rather than at send time, so a change to the
 	 * list also covers emails still waiting out the threshold. Rows that
 	 * don't match are left unflagged.
 	 *
 	 * With the secondary notice on, a row still unopened past
 	 * unopened_second_hours (counted from sending, like unopened_hours) is
-	 * texted once more. unopened_alerted counts the alerts sent: 0 none, 1
+	 * alerted once more. unopened_alerted counts the alerts sent: 0 none, 1
 	 * the first, 2 the secondary.
 	 *
-	 * Runs whenever open tracking is on and unopened_channel() has somewhere
-	 * to send to (see unopened_alerts_enabled()): there's no separate
-	 * switch, since without open tracking every delivered email looks
-	 * unopened.
+	 * Runs whenever open tracking is on (see unopened_alerts_enabled()):
+	 * there's no separate switch, and it can't run without, since every
+	 * delivered email would look unopened.
 	 */
 	public function check_unopened() {
 		if ( ! $this->unopened_alerts_enabled() ) {
@@ -1064,13 +1111,10 @@ class WPEL_Mailgun_Monitor {
 		if ( ! $watch ) {
 			return '';
 		}
-		$clauses = array();
-		foreach ( $watch as $source => $page ) {
-			$clauses[] = $page
-				? $wpdb->prepare( '( source = %s AND source_page = %d )', $source, $page )
-				: $wpdb->prepare( 'source = %s', $source );
-		}
-		return ' AND ( ' . implode( ' OR ', $clauses ) . ' )';
+		return $wpdb->prepare(
+			' AND source IN (' . implode( ', ', array_fill( 0, count( $watch ), '%s' ) ) . ')',
+			$watch
+		);
 	}
 
 	/**
@@ -1105,31 +1149,26 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * Whether check_unopened() runs: open tracking on, plus a channel that
-	 * can deliver. Email always can (notify_email() falls back to the admin
-	 * email); texts need SMS alerts on. With "both" and SMS off, only the
-	 * email goes out.
+	 * Whether check_unopened() runs: whenever open tracking is on, since
+	 * there's always a channel that can deliver (see unopened_channel()).
 	 *
 	 * @param array|null $o Settings to check; null for the saved ones.
 	 */
 	public function unopened_alerts_enabled( $o = null ) {
 		$o = $this->settings( $o );
-		if ( empty( $o['track_opens'] ) ) {
-			return false;
-		}
-		return 'sms' !== $this->unopened_channel( $o ) || $this->sms_enabled( $o );
+		return ! empty( $o['track_opens'] );
 	}
 
 	/**
-	 * How unopened alerts are sent: 'sms', 'email' or 'both'. Defaults to
-	 * 'sms', which is all there was before the choice existed.
+	 * How unopened alerts are sent: 'sms' with SMS alerts on, otherwise
+	 * 'email' (notify_email() falls back to the admin email, so it always
+	 * has somewhere to go). Older versions let the admin pick, saved as
+	 * unopened_channel; that setting is no longer read.
 	 *
 	 * @param array|null $o Settings to check; null for the saved ones.
 	 */
 	public function unopened_channel( $o = null ) {
-		$o       = $this->settings( $o );
-		$channel = isset( $o['unopened_channel'] ) ? $o['unopened_channel'] : 'sms';
-		return in_array( $channel, array( 'sms', 'email', 'both' ), true ) ? $channel : 'sms';
+		return $this->sms_enabled( $o ) ? 'sms' : 'email';
 	}
 
 	/**
@@ -1169,8 +1208,8 @@ class WPEL_Mailgun_Monitor {
 
 	/**
 	 * One alert for everything a check_unopened() pass flagged: the full
-	 * details for a single email, otherwise a short list. Sent as a text,
-	 * an email or both, per unopened_channel().
+	 * details for a single email, otherwise a short list. Sent as a text or
+	 * an email, per unopened_channel().
 	 *
 	 * @param object[] $rows
 	 * @param int      $hours
@@ -1218,14 +1257,12 @@ class WPEL_Mailgun_Monitor {
 		// Slack — disabled for now, see notify_slack() and the note in handle_failure().
 		// $this->notify_slack( $text );
 
-		$channel = $this->unopened_channel();
-		if ( 'email' !== $channel ) {
+		if ( 'sms' === $this->unopened_channel() ) {
 			$this->notify_twilio( $text );
-		}
-		if ( 'sms' !== $channel ) {
+		} else {
 			$this->notify_email(
 				sprintf(
-					'[Mailgun Watch] %s%s on %s',
+					'[Form Alert] %s%s on %s',
 					1 === count( $rows ) ? 'Unopened email' : count( $rows ) . ' unopened emails',
 					$tag,
 					$host

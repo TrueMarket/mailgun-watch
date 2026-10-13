@@ -1,7 +1,8 @@
 <?php
 /**
  * Works out where each email came from, so the log can show it and the
- * unopened-email alert can be limited to the sources an admin cares about.
+ * unopened-email alert and submission texts can be limited to the sources
+ * an admin cares about.
  *
  * wp_mail() itself has no idea what triggered it, so this is recorded at
  * send time (see WPEL_Mailgun_Monitor::capture_outgoing()) as two values:
@@ -213,26 +214,43 @@ class WPEL_Sources {
 	}
 
 	/* -------------------------------------------------------------------- */
-	/* Unopened-alert watch list                                             */
+	/* Watch list                                                            */
 	/* -------------------------------------------------------------------- */
 
 	/**
-	 * Sources the unopened alert is limited to, as source => page id (0 =
-	 * any page). Empty means no unopened alerts at all.
+	 * Sources ticked under "Watched emails". Each gets a text as soon as it's
+	 * sent (with SMS alerts on) and an alert if it goes unopened (with Track
+	 * opens on). Empty means neither kind of alert is sent.
 	 *
-	 * @return array
+	 * Older versions saved two separate lists, unopened_watch and
+	 * submission_watch, as source => page id. Until the settings are next
+	 * saved, the sources from both stand in, without the page limits.
+	 *
+	 * @param array|null $o Settings to read; null for the saved ones.
+	 * @return string[]
 	 */
-	public static function watched() {
-		$o = get_option( WPEL_OPTION, array() );
-		return ! empty( $o['unopened_watch'] ) && is_array( $o['unopened_watch'] ) ? $o['unopened_watch'] : array();
+	public static function watched( $o = null ) {
+		$o = is_array( $o ) ? $o : get_option( WPEL_OPTION, array() );
+		if ( isset( $o['watched_sources'] ) ) {
+			return is_array( $o['watched_sources'] ) ? $o['watched_sources'] : array();
+		}
+		$legacy = array();
+		foreach ( array( 'unopened_watch', 'submission_watch' ) as $key ) {
+			if ( ! empty( $o[ $key ] ) && is_array( $o[ $key ] ) ) {
+				$legacy += $o[ $key ];
+			}
+		}
+		return array_map( 'strval', array_keys( $legacy ) );
 	}
 
-	/**
-	 * Settings-page group a source's page picker belongs to: one per form
-	 * (shared by its notifications/email actions), otherwise the source.
-	 */
-	public static function group_key( $source ) {
-		return preg_match( '/^((?:forminator|html-forms):\d+)(:|$)/', $source, $m ) ? $m[1] : $source;
+	/** Whether $source is ticked under "Watched emails". */
+	public static function is_watched( $source ) {
+		return '' !== (string) $source && in_array( (string) $source, self::watched(), true );
+	}
+
+	/** Whether a source is a form plugin's (see FORM_PLUGINS) rather than a request type. */
+	public static function is_form( $source ) {
+		return (bool) preg_match( '/^(?:forminator|html-forms):\d+(?::|$)/', (string) $source );
 	}
 
 	/* -------------------------------------------------------------------- */
@@ -406,71 +424,10 @@ class WPEL_Sources {
 	}
 
 	/**
-	 * Pages a form can be picked on: where its shortcode or block appears in
-	 * post content, plus any page a logged submission came from (which also
-	 * covers page builders that keep content elsewhere).
-	 *
-	 * @param string $group e.g. 'forminator:83', 'html-forms:12'.
-	 * @return array page id => title
-	 */
-	public function form_pages( $group ) {
-		global $wpdb;
-		list( $prefix, $form_id ) = array_pad( explode( ':', $group, 2 ), 2, 0 );
-		$form_id                  = (int) $form_id;
-
-		$needles = array();
-		if ( 'forminator' === $prefix ) {
-			$needles = array(
-				'[forminator_form id="' . $form_id . '"',
-				"[forminator_form id='" . $form_id . "'",
-				'"module_id":"' . $form_id . '"',
-			);
-		} elseif ( 'html-forms' === $prefix ) {
-			$needles = array(
-				'[hf_form id="' . $form_id . '"',
-				"[hf_form id='" . $form_id . "'",
-			);
-			$form = $this->html_forms_form( $form_id );
-			if ( $form && '' !== $form->slug ) {
-				$needles[] = '[hf_form slug="' . $form->slug . '"';
-				$needles[] = "[hf_form slug='" . $form->slug . "'";
-				$needles[] = '<!-- wp:html-forms/form {"slug":"' . $form->slug . '"';
-			}
-		}
-
-		$ids = array();
-		if ( $needles ) {
-			$likes = array();
-			foreach ( $needles as $needle ) {
-				$likes[] = $wpdb->prepare( 'post_content LIKE %s', '%' . $wpdb->esc_like( $needle ) . '%' );
-			}
-			$ids = $wpdb->get_col(
-				"SELECT ID FROM {$wpdb->posts}
-				 WHERE post_status IN ('publish','private','draft')
-				   AND post_type NOT IN ('revision','nav_menu_item')
-				   AND ( " . implode( ' OR ', $likes ) . ' )
-				 LIMIT 50'
-			);
-		}
-
-		$logged = $wpdb->get_col(
-			$wpdb->prepare(
-				'SELECT DISTINCT source_page FROM ' . WPEL_Mailgun_Monitor::table() . '
-				 WHERE source_page > 0 AND ( source = %s OR source LIKE %s )
-				 LIMIT 50',
-				$group,
-				$wpdb->esc_like( $group . ':' ) . '%'
-			)
-		);
-
-		return $this->titles( array_merge( $ids, $logged ) );
-	}
-
-	/**
 	 * Sources seen in the log other than those of active form plugins (which
-	 * the settings page lists by form instead), with the pages each came from.
+	 * the settings page lists by form instead).
 	 *
-	 * @return array source => array( page id => title )
+	 * @return string[]
 	 */
 	public function logged_sources() {
 		global $wpdb;
@@ -480,24 +437,12 @@ class WPEL_Sources {
 				$exclude .= $wpdb->prepare( ' AND source NOT LIKE %s', $wpdb->esc_like( $prefix . ':' ) . '%' );
 			}
 		}
-		$rows = $wpdb->get_results(
-			"SELECT source, source_page FROM " . WPEL_Mailgun_Monitor::table() . "
+		return $wpdb->get_col(
+			"SELECT DISTINCT source FROM " . WPEL_Mailgun_Monitor::table() . "
 			 WHERE source IS NOT NULL AND source <> ''{$exclude}
-			 GROUP BY source, source_page
 			 ORDER BY source
 			 LIMIT 500"
 		);
-
-		$out = array();
-		foreach ( $rows as $row ) {
-			if ( ! isset( $out[ $row->source ] ) ) {
-				$out[ $row->source ] = array();
-			}
-			if ( (int) $row->source_page > 0 ) {
-				$out[ $row->source ][] = (int) $row->source_page;
-			}
-		}
-		return array_map( array( $this, 'titles' ), $out );
 	}
 
 	/** Every source seen in the log, for the Email Log's filter. */
@@ -509,17 +454,6 @@ class WPEL_Sources {
 			 ORDER BY source
 			 LIMIT 500"
 		);
-	}
-
-	/** @return array page id => title, for the given ids (deduplicated, missing posts dropped). */
-	private function titles( $ids ) {
-		$out = array();
-		foreach ( array_unique( array_map( 'intval', $ids ) ) as $id ) {
-			if ( $id > 0 && get_post( $id ) ) {
-				$out[ $id ] = self::page_title( $id );
-			}
-		}
-		return $out;
 	}
 
 	private function forminator_form( $id ) {
