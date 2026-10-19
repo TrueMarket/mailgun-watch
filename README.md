@@ -134,8 +134,7 @@ section in readme.txt containing a short and concise list of all changes in the 
 
 Show me the list of changes before commiting.
 
-Commit everything, tag the commit vX.Y.Z to match, and push both main
-and the tag to origin.
+Commit everything, tag the commit vX.Y.Z to match, and push both main and the tag to origin.
 ```
 
 The changelog notes matter, not just as documentation — they're what WordPress shows in the "View version X.X details" popup on the Plugins screen, since the update checker reads them straight out of `readme.txt`'s `== Changelog ==` section for whichever tag it's looking at.

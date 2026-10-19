@@ -12,7 +12,7 @@
  *                  html-forms:45:email-1                  the 1st "Send Email" action of an HTML Forms form
  *                  ajax:my_action / admin-post:my_action  an AJAX / admin-post.php handler
  *                  rest:/contact-form-7/v1/...            a REST route
- *                  cron, cli, admin, wp-login, front      anything else, by request type
+ *                  cron, cli, xmlrpc, admin, wp-login, front  anything else, by request type
  *   source_page  the post/page the visitor was on (0 if none or unknown)
  *
  * Form plugins (Forminator, HTML Forms) are recognized through their own
@@ -93,6 +93,8 @@ class WPEL_Sources {
 			$source = 'cli';
 		} elseif ( wp_doing_cron() ) {
 			$source = 'cron';
+		} elseif ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) {
+			$source = 'xmlrpc';
 		} elseif ( wp_doing_ajax() ) {
 			$source       = 'ajax:' . $this->request_action();
 			$from_referer = true;
@@ -286,8 +288,9 @@ class WPEL_Sources {
 		$fixed = array(
 			'cron'     => 'Scheduled task (WP-Cron)',
 			'cli'      => 'WP-CLI',
+			'xmlrpc'   => 'XML-RPC (xmlrpc.php)',
 			'admin'    => 'WordPress admin',
-			'wp-login' => 'Login / password reset',
+			'wp-login' => 'Login page (wp-login.php)',
 			'front'    => 'Front-end page',
 		);
 		if ( isset( $fixed[ $source ] ) ) {
