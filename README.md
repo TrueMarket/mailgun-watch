@@ -12,7 +12,7 @@ Sends every outgoing WordPress email through the **Mailgun HTTP API** when API s
 5. Go to **Form Alert → Settings** and fill in the following. There are three tabs: **General** (client-facing: a plain-language overview plus alert email, SMS alerts, alert phone numbers, Track opens with its unopened-email alerts, and the watched forms list; the setup checklist sidebar is hidden on this tab), **Sending** and **Alerting & Logging** (Twilio credentials, webhook details, retention, outage detection and other watched emails). The Sending tab's **SMTP fallback** section is normally already filled in on sites cloned from the boilerplate, so mail works before any of this is done.
    - **Mailgun API key** (Sending) — create a separate key for each site (Mailgun → *Settings → API Keys*) so one site's key can be revoked without affecting the others. Use a full API key, not a domain sending key.
    - **Mailgun sending domain** (Sending, US region only) — a dedicated one for this site
-   - **From name/email** (Sending; shared by the API and the SMTP fallback) — the email must be on this site's sending domain once it has one; entering the domain switches an SMTP-domain address over to `wordpress@` that domain automatically. Leave the name blank to use the Site Title.
+   - **From name/email** (Sending; shared by the API and the SMTP fallback) — the email must be on this site's sending domain once it has one; entering the domain switches an SMTP-domain address over to `noreply@` that domain automatically. Leave the name blank to use the Site Title.
    - **Alert email recipient** (General) — falls back to the site's admin email when blank, for both real alerts and **Send test email**.
    - **SMS alerts** (optional) — tick **Enable SMS alerts** on the General tab, then fill in:
      - **Alert phone numbers** (General, shown while SMS alerts are on) — comma-separated numbers that should receive SMS alerts. Recipients don't need an app, an account, or to subscribe to anything.
@@ -41,6 +41,10 @@ Each row also records its **source**: what sent it, and the page the visitor was
 - **Anything else**: the type of request, e.g. `ajax:<action>`, `admin-post:<action>`, `rest:<route>`, cron, WP-CLI, the admin, the login page, or a front-end page. For AJAX, REST and admin-post requests the page comes from the referer, since form submissions are usually posted somewhere other than the page the form is on.
 
 The log has a **Source** column and a source filter that works with the status tabs. Rows created only from Mailgun events, and rows logged before this was added, have no source.
+
+The log also has a **From** column showing the address each email actually went out from (after any "Force from" override); hover it for the full name and address. Rows logged before the plugin recorded senders, and emails that haven't been sent yet, show a dash.
+
+The search box at the top right matches the recipient, subject, From address or Mailgun message ID. Searching keeps the selected status tab and source, and the tab counts reflect the search.
 
 ## How it works
 

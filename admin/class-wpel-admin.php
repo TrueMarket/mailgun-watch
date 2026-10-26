@@ -817,7 +817,7 @@ class WPEL_Admin {
 						</tr>
 						<tr>
 							<th scope="row"><label for="wpel_from_email">From email</label></th>
-							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_email]" id="wpel_from_email" type="email" class="regular-text" placeholder="<?php echo esc_attr( ! empty( $o['smtp_username'] ) ? $o['smtp_username'] : 'wordpress@mg.example.com' ); ?>" value="<?php echo esc_attr( isset( $o['from_email'] ) ? $o['from_email'] : '' ); ?>">
+							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[from_email]" id="wpel_from_email" type="email" class="regular-text" placeholder="<?php echo esc_attr( ! empty( $o['smtp_username'] ) ? $o['smtp_username'] : 'noreply@mg.example.com' ); ?>" value="<?php echo esc_attr( isset( $o['from_email'] ) ? $o['from_email'] : '' ); ?>">
 							<p class="description">Must be on your sending domain.</p>
 							<p><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[force_from_email]" value="1" <?php checked( wpel_force_from( $o, 'email' ) ); ?>> Force from email</label></p>
 							<p class="description">Always use this address, even if a plugin/theme sets its own.</p></td>
@@ -1036,7 +1036,7 @@ class WPEL_Admin {
 			var smtpDomain = <?php echo wp_json_encode( WPEL_Mailer::instance()->smtp_domain() ); ?>;
 
 			function deriveEmail( domain ) {
-				return domain ? 'wordpress@' + domain : '';
+				return domain ? 'noreply@' + domain : '';
 			}
 
 			function onSmtpDomain( email ) {
@@ -1526,18 +1526,24 @@ class WPEL_Admin {
 		$allowed = array( 'pending', 'sent', 'delivered', 'failed', 'temp-fail', 'complained' );
 		$filter  = isset( $_GET['status'] ) ? sanitize_text_field( wp_unslash( $_GET['status'] ) ) : '';
 		$source  = isset( $_GET['source'] ) ? WPEL_Sources::clean( wp_unslash( $_GET['source'] ) ) : '';
+		$search  = isset( $_GET['s'] ) ? trim( sanitize_text_field( wp_unslash( $_GET['s'] ) ) ) : '';
 		$paged   = max( 1, (int) ( $_GET['paged'] ?? 1 ) );
 		$per     = 50;
 		$offset  = ( $paged - 1 ) * $per;
 		$sources = WPEL_Sources::instance();
 
-		// The source filter narrows every status tab (and their counts); the
-		// status tabs themselves stay exclusive. 'opened' is a pseudo-status:
-		// a single exclusive tab like the others (not a combinable toggle), so
-		// every link in the row replaces the status view wholesale.
+		// The source filter and search narrow every status tab (and their
+		// counts); the status tabs themselves stay exclusive. 'opened' is a
+		// pseudo-status: a single exclusive tab like the others (not a
+		// combinable toggle), so every link in the row replaces the status
+		// view wholesale.
 		$conditions = array();
 		if ( '' !== $source ) {
 			$conditions[] = $wpdb->prepare( 'source = %s', $source );
+		}
+		if ( '' !== $search ) {
+			$like         = '%' . $wpdb->esc_like( $search ) . '%';
+			$conditions[] = $wpdb->prepare( '(recipient LIKE %s OR subject LIKE %s OR from_address LIKE %s OR mailgun_message_id LIKE %s)', $like, $like, $like, $like );
 		}
 		$by_source = $conditions ? ' WHERE ' . implode( ' AND ', $conditions ) : '';
 
@@ -1558,11 +1564,18 @@ class WPEL_Admin {
 		if ( '' !== $source ) {
 			$log_url = add_query_arg( 'source', rawurlencode( $source ), $log_url );
 		}
+		if ( '' !== $search ) {
+			$log_url = add_query_arg( 's', rawurlencode( $search ), $log_url );
+		}
 		$logged_sources = $sources->all_logged_sources();
 		?>
 		<div class="wrap">
 			<?php $this->render_logo(); ?>
-			<h1>Email Log</h1>
+			<h1 class="wp-heading-inline">Email Log</h1>
+			<?php if ( '' !== $search ) : ?>
+				<span class="subtitle">Search results for: <strong><?php echo esc_html( $search ); ?></strong></span>
+			<?php endif; ?>
+			<hr class="wp-header-end">
 			<?php $this->log_bulk_notice(); ?>
 			<ul class="subsubsub">
 				<li><a href="<?php echo esc_url( $log_url ); ?>" <?php echo '' === $filter ? 'class="current"' : ''; ?>>All</a> |</li>
@@ -1579,7 +1592,7 @@ class WPEL_Admin {
 					</a>
 				</li>
 			</ul>
-			<?php // Its fields sit in the tablenav below via form="" — a real <form> can't nest inside the bulk-action form. ?>
+			<?php // Its fields (source filter, search) sit in the tablenav below via form="" — a real <form> can't nest inside the bulk-action form. ?>
 			<form id="wpel-log-filter" method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>">
 				<input type="hidden" name="page" value="wpel-log">
 				<?php if ( '' !== $filter ) : ?>
@@ -1612,6 +1625,11 @@ class WPEL_Admin {
 					</select>
 					<button type="submit" class="button" form="wpel-log-filter">Filter</button>
 				</div>
+				<div class="alignright actions" style="padding-right:0">
+					<label class="screen-reader-text" for="wpel-log-search">Search emails:</label>
+					<input type="search" id="wpel-log-search" name="s" form="wpel-log-filter" style="width:280px" value="<?php echo esc_attr( $search ); ?>" placeholder="Recipient, subject, sender…">
+					<button type="submit" class="button" form="wpel-log-filter">Search emails</button>
+				</div>
 				<br class="clear">
 			</div>
 			<table class="wp-list-table widefat fixed striped">
@@ -1622,6 +1640,7 @@ class WPEL_Admin {
 							<input id="cb-select-all-1" type="checkbox">
 						</td>
 						<th style="width:150px">When</th>
+						<th>From</th>
 						<th>Recipient</th>
 						<th>Subject</th>
 						<th style="width:100px">Status</th>
@@ -1633,7 +1652,7 @@ class WPEL_Admin {
 				</thead>
 				<tbody>
 				<?php if ( empty( $rows ) ) : ?>
-					<tr><td colspan="9">No entries.</td></tr>
+					<tr><td colspan="10">No entries.</td></tr>
 				<?php else : ?>
 					<?php foreach ( $rows as $r ) :
 						$badge = array(
@@ -1652,6 +1671,18 @@ class WPEL_Admin {
 								<input id="cb-select-<?php echo (int) $r->id; ?>" type="checkbox" name="ids[]" value="<?php echo (int) $r->id; ?>">
 							</th>
 							<td><?php echo esc_html( $r->created_at ); ?></td>
+							<td><?php
+							// Stored as "Name <email>" or a bare address; show just the
+							// address, with the name in the tooltip. Older rows predate
+							// the column and unsent ones haven't been stamped yet.
+							$from = isset( $r->from_address ) ? (string) $r->from_address : '';
+							if ( '' === $from ) {
+								echo '&mdash;';
+							} else {
+								$from_email = preg_match( '/<([^>]+)>/', $from, $m ) ? $m[1] : $from;
+								printf( '<span title="%1$s">%2$s</span>', esc_attr( $from ), esc_html( $from_email ) );
+							}
+							?></td>
 							<td><?php echo esc_html( $r->recipient ); ?></td>
 							<td><?php echo esc_html( $r->subject ); ?></td>
 							<td><span style="color:#fff;background:<?php echo esc_attr( $color ); ?>;padding:2px 8px;border-radius:3px;font-size:11px"><?php echo esc_html( $r->status ); ?></span></td>
