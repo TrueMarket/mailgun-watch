@@ -1395,7 +1395,9 @@ class WPEL_Admin {
 			$ids    = isset( $_POST['ids'] ) ? array_values( array_unique( array_filter( array_map( 'absint', (array) $_POST['ids'] ) ) ) ) : array();
 		}
 		$back   = wp_get_referer() ? wp_get_referer() : admin_url( 'admin.php?page=wpel-log' );
-		$back   = remove_query_arg( $this->removable_query_args( array() ), $back );
+		// The referer still carries ?entry= if the page was loaded from a
+		// shared link, which would reopen that email after the redirect.
+		$back   = remove_query_arg( $this->removable_query_args( array( 'entry' ) ), $back );
 
 		$done    = 0;
 		$skipped = 0;
@@ -1767,6 +1769,7 @@ class WPEL_Admin {
 						<div class="wpel-modal-panel" data-panel="source"></div>
 					</div>
 					<div class="wpel-modal-footer">
+						<button type="button" class="button" data-wpel-copy-link>Copy link</button>
 						<button type="button" class="button" data-wpel-close>Close</button>
 					</div>
 				</div>
@@ -1844,6 +1847,7 @@ class WPEL_Admin {
 			var title       = document.getElementById( 'wpel-entry-title' );
 			var tabs        = modal.querySelectorAll( '.nav-tab' );
 			var sourceTab   = modal.querySelector( '[data-tab="source"]' );
+			var copyLink    = modal.querySelector( '[data-wpel-copy-link]' );
 			var panels      = {};
 			var request     = 0; // ignores a slow response that lands after another entry was opened
 
@@ -1955,8 +1959,22 @@ class WPEL_Admin {
 				sourceTab.style.display = '';
 			}
 
+			// Mirrors the open entry into the address bar (?entry=123) so the
+			// URL can be shared or bookmarked and reopens the same email.
+			// replaceState rather than pushState, so Back still leaves the page.
+			function setEntryParam( id ) {
+				var url = new URL( window.location.href );
+				if ( id ) {
+					url.searchParams.set( 'entry', id );
+				} else {
+					url.searchParams.delete( 'entry' );
+				}
+				window.history.replaceState( window.history.state, '', url.toString() );
+			}
+
 			function open( id ) {
 				var mine = ++request;
+				setEntryParam( id );
 				clear();
 				title.textContent       = 'Email #' + id;
 				sourceTab.style.display = 'none'; // only meaningful for HTML mail
@@ -2010,10 +2028,33 @@ class WPEL_Admin {
 				}
 			} );
 
+			copyLink.addEventListener( 'click', function () {
+				var url = window.location.href;
+				// The Clipboard API only exists on HTTPS (or localhost).
+				if ( ! navigator.clipboard ) {
+					window.prompt( 'Copy this link:', url );
+					return;
+				}
+				navigator.clipboard.writeText( url ).then( function () {
+					copyLink.textContent = 'Copied!';
+					setTimeout( function () {
+						copyLink.textContent = 'Copy link';
+					}, 2000 );
+				}, function () {
+					window.prompt( 'Copy this link:', url );
+				} );
+			} );
+
 			modal.addEventListener( 'close', function () {
 				request++;
+				setEntryParam( null );
 				clear(); // drops the iframe so nothing in it keeps loading
 			} );
+
+			var shared = parseInt( new URL( window.location.href ).searchParams.get( 'entry' ), 10 );
+			if ( shared > 0 ) {
+				open( shared );
+			}
 		} )();
 		</script>
 		<?php
