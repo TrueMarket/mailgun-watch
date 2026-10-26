@@ -2,7 +2,7 @@
 Contributors: jimlaroche
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Stable tag: 2.2.16
+Stable tag: 2.2.17
 
 Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, reconciles delivery via Mailgun webhooks, and alerts on failure.
 
@@ -11,6 +11,13 @@ Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, re
 Form Alert replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
 
 == Changelog ==
+
+= 2.2.17 =
+* Rewrote the SMS alerts in plain, client-facing wording
+* Added the submitter's email (from the notification's Reply-To) to submission and unopened texts, and dropped the subject and log link from them
+* Changed unopened alerts to send one text per form, listing every recipient and submitter, instead of one combined list
+* Changed the send-failure text to name the form and page the email came from, rather than how it was being sent
+* Renamed the outage text to "Possible email notification outage", with who to contact for website and email help
 
 = 2.2.16 =
 * Added a From column to the Email Log that showed the address each email went out from, with the full name and address on hover

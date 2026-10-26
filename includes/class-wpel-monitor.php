@@ -174,7 +174,7 @@ class WPEL_Mailgun_Monitor {
 			)
 		);
 
-		$this->notify_submission( $this->last_row_id, $to, isset( $args['subject'] ) ? $args['subject'] : '', $source );
+		$this->notify_submission( $this->last_row_id, $to, $headers, $source );
 
 		return $args;
 	}
@@ -621,12 +621,12 @@ class WPEL_Mailgun_Monitor {
 		// 1b) SMS via Twilio — same trigger, independent channel, survives an email outage.
 		$this->notify_twilio(
 			sprintf(
-				"%s - email send failed\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%sRepeats in the next hour won't be texted.\n%s",
+				"Your website form isn't sending your email notifications properly - %s\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%sFurther failures in the next hour won't be texted.\n%s",
 				$host,
 				$recipient,
 				$subject,
 				$reason,
-				$source,
+				$this->failure_source( $row_id, $source ),
 				$repeats,
 				admin_url( 'admin.php?page=wpel-log' )
 			)
@@ -693,6 +693,21 @@ class WPEL_Mailgun_Monitor {
 		return $held;
 	}
 
+	/**
+	 * The form (or other source) a failed email came from, for the failure
+	 * text, e.g. "Contact Us (Forminator) — Admin Email on Contact Us";
+	 * $fallback (how it was being sent) when the log doesn't know.
+	 */
+	private function failure_source( $row_id, $fallback ) {
+		global $wpdb;
+		$row = $row_id ? $wpdb->get_row( $wpdb->prepare( "SELECT source, source_page FROM " . self::table() . " WHERE id = %d", $row_id ) ) : null;
+		if ( ! $row || '' === (string) $row->source ) {
+			return $fallback;
+		}
+		$label = WPEL_Sources::instance()->label( $row->source );
+		return $row->source_page ? $label . ' on ' . WPEL_Sources::page_title( $row->source_page ) : $label;
+	}
+
 	private function notify_email( $subject, $body ) {
 		// A blank field (saved or never set) falls back to the admin email,
 		// matching where "Send test email" goes.
@@ -745,7 +760,7 @@ class WPEL_Mailgun_Monitor {
 
 		$this->notify_twilio(
 			sprintf(
-				"%s - POSSIBLE TOTAL EMAIL OUTAGE\nMultiple sends have failed with no successful delivery in the last %d minutes. The site may be unable to send any email right now.\n%s",
+				"%s - POSSIBLE EMAIL NOTIFICATION OUTAGE\nMultiple email notifications have been sent with no successful delivery in the last %d minutes. This could be a website issue, or an issue with your email.\nContact True Market for website assistance ( communications@truemarket.io ) and your IT provider for email assistance.\n%s",
 				$host,
 				$window,
 				admin_url( 'admin.php?page=wpel-log' )
@@ -1013,32 +1028,68 @@ class WPEL_Mailgun_Monitor {
 	 * goes out if the email then fails (which alerts separately). Counts
 	 * toward the hourly text limit like any other alert.
 	 *
-	 * @param int    $row_id Log row just created for this email.
-	 * @param string $to
-	 * @param string $subject
-	 * @param array  $source From WPEL_Sources::current().
+	 * @param int      $row_id Log row just created for this email.
+	 * @param string   $to
+	 * @param string[] $headers
+	 * @param array    $source From WPEL_Sources::current().
 	 */
-	private function notify_submission( $row_id, $to, $subject, $source ) {
+	private function notify_submission( $row_id, $to, $headers, $source ) {
 		if ( ! $row_id || ! $this->sms_enabled() || ! WPEL_Sources::is_watched( $source['source'] ) ) {
 			return;
 		}
 
-		$sources = WPEL_Sources::instance();
-		$text    = sprintf(
-			"%s - %s\n%s: %s\n%sEmail to: %s\nSubject: %s\n%s",
-			wp_parse_url( home_url(), PHP_URL_HOST ),
-			WPEL_Sources::is_form( $source['source'] ) ? 'new form submission' : 'watched email sent',
-			WPEL_Sources::is_form( $source['source'] ) ? 'Form' : 'From',
-			$sources->label( $source['source'] ),
-			$source['page'] ? 'Page: ' . WPEL_Sources::page_title( $source['page'] ) . "\n" : '',
-			$to,
-			$subject,
-			admin_url( 'admin.php?page=wpel-log' )
-		);
+		$host = wp_parse_url( home_url(), PHP_URL_HOST );
+		list( $is_form, $where ) = $this->describe_watched( $source['source'], $source['page'] );
+
+		$text = $is_form
+			? sprintf( 'You have a new form submission from %s%s.', $host, '' !== $where ? ' - ' . $where : '' )
+			: sprintf( 'A watched email was just sent from %s (%s).', $host, $where );
+		$text .= "\nSent to: " . $to;
+		$by    = $this->submitter( $headers );
+		if ( '' !== $by ) {
+			$text .= "\nSubmitted by: " . $by;
+		}
 
 		if ( $this->notify_twilio( $text ) ) {
 			$this->update_row( $row_id, array(), 'submission_text' );
 		}
+	}
+
+	/**
+	 * How the submission and unopened texts describe a watched email: a form
+	 * submission when it's from a form plugin or was sent from a page (e.g.
+	 * Contact Form 7's REST posts), named by that page; otherwise a watched
+	 * email, named by its source.
+	 *
+	 * @param string $source
+	 * @param int    $page
+	 * @return array{0: bool, 1: string} Whether it's a form submission, and
+	 *         the place to name it by ('' for a form with no known page).
+	 */
+	private function describe_watched( $source, $page ) {
+		if ( WPEL_Sources::is_form( $source ) || $page ) {
+			return array( true, $page ? WPEL_Sources::page_title( $page ) . ' page' : '' );
+		}
+		return array( false, WPEL_Sources::instance()->label( $source ) );
+	}
+
+	/**
+	 * The visitor's address from a form notification's Reply-To header, which
+	 * form plugins set to the email the visitor entered; '' when there's none.
+	 *
+	 * @param string[]|string $headers Header lines, or the log's JSON copy of them.
+	 */
+	private function submitter( $headers ) {
+		if ( is_string( $headers ) ) {
+			$headers = json_decode( $headers, true );
+		}
+		foreach ( (array) $headers as $h ) {
+			if ( is_string( $h ) && 0 === stripos( $h, 'reply-to:' ) ) {
+				$value = trim( substr( $h, 9 ) );
+				return preg_match( '/<([^>]+)>/', $value, $m ) ? trim( $m[1] ) : $value;
+			}
+		}
+		return '';
 	}
 
 	/* -------------------------------------------------------------------- */
@@ -1049,8 +1100,8 @@ class WPEL_Mailgun_Monitor {
 	 * Hourly cron (wpel_check_unopened): flags 'delivered' emails that have
 	 * sat with open_count = 0 past the configured threshold. Each row is
 	 * alerted at most once per stage (unopened_alerted), and each run sends
-	 * a single text per stage however many rows it flags, so a busy site
-	 * can't turn one run into a flood of texts.
+	 * one text per form (source + page) per stage however many rows it flags,
+	 * so a busy form can't turn one run into a flood of texts.
 	 *
 	 * Only rows from the sources ticked under "Watched emails" (WPEL_Sources::watched()) count. The
 	 * filter is applied here rather than at send time, so a change to the
@@ -1134,7 +1185,7 @@ class WPEL_Mailgun_Monitor {
 		// $scope is already prepared, so it's appended rather than run through prepare() again.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT id, recipient, subject, created_at, source, source_page FROM {$table}
+				"SELECT id, recipient, subject, headers, created_at, source, source_page FROM {$table}
 				 WHERE status = 'delivered' AND open_count = 0 AND unopened_alerted = %d AND created_at <= %s",
 				$stage,
 				$cutoff
@@ -1207,9 +1258,9 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * One alert for everything a check_unopened() pass flagged: the full
-	 * details for a single email, otherwise a short list. Sent as a text or
-	 * an email, per unopened_channel().
+	 * Alerts for everything a check_unopened() pass flagged, one per form
+	 * (source + page), naming who each went to and who submitted it. Sent as
+	 * a text or an email, per unopened_channel().
 	 *
 	 * @param object[] $rows
 	 * @param int      $hours
@@ -1220,56 +1271,55 @@ class WPEL_Mailgun_Monitor {
 		$link = admin_url( 'admin.php?page=wpel-log&status=delivered' );
 		$tag  = $second ? ' (2nd notice)' : '';
 
-		if ( 1 === count( $rows ) ) {
-			$row  = $rows[0];
-			$from = '';
-			if ( $row->source ) {
-				$from = 'From: ' . WPEL_Sources::instance()->label( $row->source );
-				if ( $row->source_page ) {
-					$from .= ' on ' . WPEL_Sources::page_title( $row->source_page );
-				}
-				$from .= "\n";
-			}
-			$text = sprintf(
-				"%s - %sunopened after %dh%s\nTo: %s\nSubject: %s\n%sDelivered: %s\n%s",
-				$host,
-				$second ? 'still ' : '',
-				$hours,
-				$tag,
-				$row->recipient,
-				$row->subject,
-				$from,
-				$row->created_at,
-				$link
-			);
-		} else {
-			$shown = 5;
-			$text  = sprintf( "%s - %d emails %sunopened after %dh%s\n", $host, count( $rows ), $second ? 'still ' : '', $hours, $tag );
-			foreach ( array_slice( $rows, 0, $shown ) as $row ) {
-				$text .= sprintf( "- %s: %s\n", $row->recipient, $row->subject );
-			}
-			if ( count( $rows ) > $shown ) {
-				$text .= sprintf( "+%d more\n", count( $rows ) - $shown );
-			}
-			$text .= $link;
+		$groups = array();
+		foreach ( $rows as $row ) {
+			$groups[ $row->source . '|' . (int) $row->source_page ][] = $row;
 		}
 
-		// Slack — disabled for now, see notify_slack() and the note in handle_failure().
-		// $this->notify_slack( $text );
+		foreach ( $groups as $group ) {
+			$count = count( $group );
+			list( $is_form, $where ) = $this->describe_watched( $group[0]->source, (int) $group[0]->source_page );
+			$from = $host . ( '' !== $where ? ' (' . $where . ')' : '' );
 
-		if ( 'sms' === $this->unopened_channel() ) {
-			$this->notify_twilio( $text );
-		} else {
-			$this->notify_email(
-				sprintf(
-					'[Form Alert] %s%s on %s',
-					1 === count( $rows ) ? 'Unopened email' : count( $rows ) . ' unopened emails',
-					$tag,
-					$host
-				),
-				$text
-			);
+			if ( 1 === $count ) {
+				$text = sprintf( "%s from %s hasn't been opened for %dhrs.", $is_form ? 'Your new form submission' : 'Your watched email', $from, $hours );
+			} else {
+				$text = sprintf( "%d %s from %s haven't been opened for %dhrs.", $count, $is_form ? 'new form submissions' : 'watched emails', $from, $hours );
+			}
+			$text .= "\nSent to: " . $this->list_of( wp_list_pluck( $group, 'recipient' ) );
+			$by    = $this->list_of( array_map( array( $this, 'submitter' ), wp_list_pluck( $group, 'headers' ) ) );
+			if ( '' !== $by ) {
+				$text .= "\nSubmitted by: " . $by;
+			}
+
+			// Slack — disabled for now, see notify_slack() and the note in handle_failure().
+			// $this->notify_slack( $text );
+
+			if ( 'sms' === $this->unopened_channel() ) {
+				$this->notify_twilio( $text );
+			} else {
+				$this->notify_email(
+					sprintf(
+						'[Form Alert] %s%s on %s',
+						1 === $count ? 'Unopened email' : $count . ' unopened emails',
+						$tag,
+						$host
+					),
+					$text . "\n\nReview: " . $link
+				);
+			}
 		}
+	}
+
+	/** Distinct, non-blank values as a comma-separated list: the first 10, then "+N more". */
+	private function list_of( $values ) {
+		$values = array_values( array_unique( array_filter( array_map( 'trim', array_map( 'strval', $values ) ) ) ) );
+		$shown  = 10;
+		$out    = implode( ', ', array_slice( $values, 0, $shown ) );
+		if ( count( $values ) > $shown ) {
+			$out .= sprintf( ' +%d more', count( $values ) - $shown );
+		}
+		return $out;
 	}
 
 	/**

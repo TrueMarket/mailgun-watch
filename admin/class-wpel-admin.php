@@ -918,7 +918,7 @@ class WPEL_Admin {
 							<th scope="row">Outage detection</th>
 							<td>
 								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[outage_threshold]" type="number" min="1" value="<?php echo esc_attr( isset( $o['outage_threshold'] ) ? $o['outage_threshold'] : 5 ); ?>" style="width:70px"> failures within
-								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[outage_window]" type="number" min="1" value="<?php echo esc_attr( isset( $o['outage_window'] ) ? $o['outage_window'] : 15 ); ?>" style="width:70px"> minutes (with no success) triggers the "possible total email outage" SMS alarm.
+								<input name="<?php echo esc_attr( WPEL_OPTION ); ?>[outage_window]" type="number" min="1" value="<?php echo esc_attr( isset( $o['outage_window'] ) ? $o['outage_window'] : 15 ); ?>" style="width:70px"> minutes (with no success) triggers the "possible email notification outage" SMS alarm.
 							</td>
 						</tr>
 					</table>
