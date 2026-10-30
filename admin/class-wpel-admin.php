@@ -79,6 +79,7 @@ class WPEL_Admin {
 		// SMS via Twilio. The fields stay saved while the toggle is off, so
 		// switching it back on doesn't mean re-entering them.
 		$out['sms_enabled']        = ! empty( $input['sms_enabled'] ) ? 1 : 0;
+		$out['submission_texts']   = ! empty( $input['submission_texts'] ) ? 1 : 0;
 		$out['twilio_account_sid'] = sanitize_text_field( isset( $input['twilio_account_sid'] ) ? $input['twilio_account_sid'] : '' );
 		$out['twilio_sid']         = sanitize_text_field( isset( $input['twilio_sid'] ) ? $input['twilio_sid'] : '' );
 		$out['twilio_auth_token']  = $this->sanitize_secret( $input, $previous, 'twilio_auth_token' );
@@ -99,7 +100,7 @@ class WPEL_Admin {
 		$out['unopened_second']  = ! empty( $input['unopened_second'] ) ? 1 : 0;
 		// The secondary notice always comes after the first alert.
 		$out['unopened_second_hours'] = max( $out['unopened_hours'] + 1, (int) ( isset( $input['unopened_second_hours'] ) ? $input['unopened_second_hours'] : 48 ) );
-		// "Watched emails": texted when sent (SMS alerts) and alerted if unopened (Track opens).
+		// "Watched emails": texted when sent (Submission texts) and alerted if unopened (Track opens).
 		$out['watched_sources']  = $this->sanitize_watch( $input );
 
 		// A previously-passing webhook check or test send no longer proves
@@ -703,12 +704,13 @@ class WPEL_Admin {
 		$o = get_option( WPEL_OPTION, array() );
 		// Missing key (an install that activated before this option existed)
 		// defaults to enabled — matches WPEL_Mailer's own default resolution.
-		$sending_enabled = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
-		$transport       = WPEL_Mailer::instance()->transport();
-		$smtp_encryption = isset( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
-		$sms_enabled     = WPEL_Mailgun_Monitor::instance()->sms_enabled();
-		$track_opens     = ! empty( $o['track_opens'] );
-		$unopened_second = ! empty( $o['unopened_second'] );
+		$sending_enabled  = ! isset( $o['sending_enabled'] ) || ! empty( $o['sending_enabled'] );
+		$transport        = WPEL_Mailer::instance()->transport();
+		$smtp_encryption  = isset( $o['smtp_encryption'] ) ? $o['smtp_encryption'] : 'tls';
+		$sms_enabled      = WPEL_Mailgun_Monitor::instance()->sms_enabled();
+		$submission_texts = ! empty( $o['submission_texts'] );
+		$track_opens      = ! empty( $o['track_opens'] );
+		$unopened_second  = ! empty( $o['unopened_second'] );
 		?>
 		<div class="wrap">
 			<?php $this->render_logo(); ?>
@@ -736,8 +738,8 @@ class WPEL_Admin {
 							<li>Every email is recorded in the <a href="<?php echo esc_url( admin_url( 'admin.php?page=wpel-log' ) ); ?>">Log</a>, showing whether it was delivered and, with Track opens on, whether it was opened.</li>
 							<li>If an email can't be delivered, you get an alert by email, and by text with SMS alerts on.</li>
 							<li>If your website stops sending email altogether, a text lets you know, even though email can't get through.</li>
-							<li>Get a text the moment someone submits one of your watched forms.</li>
 							<li>Get an alert if a watched form's email still hasn't been opened after a set number of hours.</li>
+							<li>Optionally, get a text the moment someone submits one of your watched forms.</li>
 						</ul>
 					</div>
 
@@ -754,7 +756,7 @@ class WPEL_Admin {
 						<tr>
 							<th scope="row">SMS alerts</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working. You'll also get a text each time one of the emails ticked under "Watched emails" below is sent.</p></td>
+							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working.</p></td>
 						</tr>
 						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
@@ -764,6 +766,11 @@ class WPEL_Admin {
 							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
 							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
 							<p class="description">Mobile numbers that get the text alerts. Separate several numbers with commas. Save your changes before sending a test.</p></td>
+						</tr>
+						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+							<th scope="row">Submission texts</th>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[submission_texts]" id="wpel_submission_texts" value="1" <?php checked( $submission_texts ); ?>> Text me as soon as a watched email is sent</label>
+							<p class="description">For a form, that's the moment someone submits it, so a new enquiry is seen right away. Leave this off to only hear about watched emails that go unopened.</p></td>
 						</tr>
 						<tr>
 							<th scope="row">Track opens</th>
@@ -778,8 +785,8 @@ class WPEL_Admin {
 								<p class="description">Sent by text if SMS alerts are on, otherwise by email to the alert email recipient. Only covers emails sent after open tracking was turned on.</p>
 							</div></td>
 						</tr>
-						<?php // Only does anything with SMS alerts or Track opens on, so only shown while either is. ?>
-						<tr class="wpel-watch-row"<?php echo ( $track_opens || $sms_enabled ) ? '' : ' style="display:none"'; ?>>
+						<?php // Only does anything with Track opens or submission texts on, so only shown while either is. ?>
+						<tr class="wpel-watch-row"<?php echo ( $track_opens || ( $sms_enabled && $submission_texts ) ) ? '' : ' style="display:none"'; ?>>
 							<th scope="row">Watched emails</th>
 							<td><?php $watched_forms = $this->render_watch( $o ); ?></td>
 						</tr>
@@ -926,7 +933,7 @@ class WPEL_Admin {
 					<hr style="margin:24px 0;">
 
 					<h2 class="title">Other watched emails</h2>
-					<p class="description">Emails that don't come from a Forminator or HTML Forms form, listed once they've been sent at least once. A ticked one works like a form ticked under "Watched emails" on the General tab: a text when it's sent (with SMS alerts on) and an alert if it isn't opened (with Track opens on).</p>
+					<p class="description">Emails that don't come from a Forminator or HTML Forms form, listed once they've been sent at least once. A ticked one works like a form ticked under "Watched emails" on the General tab: an alert if it isn't opened (with Track opens on) and a text when it's sent (with Submission texts on).</p>
 					<?php $this->render_other_watch( $o, $watched_forms ); ?>
 				</div>
 
@@ -999,24 +1006,29 @@ class WPEL_Admin {
 		} )();
 
 		( function () {
-			// The alert phone numbers only apply with SMS alerts on, the
-			// unopened-alert settings with "Track opens" on, and "Watched
-			// emails" with either, so they're shown only then. Hidden fields
-			// still submit, so their saved values survive toggling these off.
-			var sms      = document.getElementById( 'wpel_sms_enabled' );
-			var opens    = document.getElementById( 'wpel_track_opens' );
-			var smsRow   = document.querySelector( '.wpel-sms-row' );
-			var watchRow = document.querySelector( '.wpel-watch-row' );
-			var unopened = document.querySelector( '.wpel-unopened-row' );
-			if ( ! sms || ! opens || ! smsRow || ! watchRow || ! unopened ) {
+			// The alert phone numbers and submission texts only apply with SMS
+			// alerts on, the unopened-alert settings with "Track opens" on, and
+			// "Watched emails" with Track opens or submission texts, so they're
+			// shown only then. Hidden fields still submit, so their saved values
+			// survive toggling these off.
+			var sms         = document.getElementById( 'wpel_sms_enabled' );
+			var submissions = document.getElementById( 'wpel_submission_texts' );
+			var opens       = document.getElementById( 'wpel_track_opens' );
+			var smsRows     = document.querySelectorAll( '.wpel-sms-row' );
+			var watchRow    = document.querySelector( '.wpel-watch-row' );
+			var unopened    = document.querySelector( '.wpel-unopened-row' );
+			if ( ! sms || ! submissions || ! opens || ! smsRows.length || ! watchRow || ! unopened ) {
 				return;
 			}
 			function sync() {
-				smsRow.style.display   = sms.checked ? '' : 'none';
+				smsRows.forEach( function ( row ) {
+					row.style.display = sms.checked ? '' : 'none';
+				} );
 				unopened.style.display = opens.checked ? '' : 'none';
-				watchRow.style.display = opens.checked || sms.checked ? '' : 'none';
+				watchRow.style.display = opens.checked || ( sms.checked && submissions.checked ) ? '' : 'none';
 			}
 			sms.addEventListener( 'change', sync );
+			submissions.addEventListener( 'change', sync );
 			opens.addEventListener( 'change', sync );
 		} )();
 
@@ -1124,8 +1136,8 @@ class WPEL_Admin {
 
 	/**
 	 * "Watched emails" setting on the General tab: one tick per email, which
-	 * gets a text as soon as it's sent (SMS alerts on) and an alert if it
-	 * goes unopened (Track opens on). Lists each form plugin's forms with the
+	 * gets an alert if it goes unopened (Track opens on) and a text as soon
+	 * as it's sent (Submission texts on). Lists each form plugin's forms with the
 	 * emails each sends (Forminator notifications, HTML Forms "Send Email"
 	 * actions), so the email to the business can be watched without the
 	 * visitor's auto-reply. Every other source is ticked on the Alerting &
@@ -1162,7 +1174,7 @@ class WPEL_Admin {
 				<?php endforeach; ?>
 			<?php endforeach; ?>
 			<?php if ( $plugins ) : ?>
-				<p class="description">Tick the emails you want to keep a close eye on. For a form, tick just the email that goes to your team, not the confirmation sent to the visitor, or you'll get two texts per submission.</p>
+				<p class="description">Tick the emails you want to keep a close eye on. For a form, tick just the email that goes to your team, not the confirmation sent to the visitor.</p>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -1351,6 +1363,7 @@ class WPEL_Admin {
 				'id'              => (int) $row->id,
 				'created_at'      => $row->created_at,
 				'from'            => isset( $row->from_address ) ? (string) $row->from_address : '', // older rows predate the column
+				'submitter'       => WPEL_Mailgun_Monitor::instance()->submitter( (string) $row->headers ),
 				'recipient'       => (string) $row->recipient,
 				'subject'         => (string) $row->subject,
 				'status'          => $row->status,
@@ -1533,6 +1546,7 @@ class WPEL_Admin {
 		$per     = 50;
 		$offset  = ( $paged - 1 ) * $per;
 		$sources = WPEL_Sources::instance();
+		$monitor = WPEL_Mailgun_Monitor::instance();
 
 		// The source filter and search narrow every status tab (and their
 		// counts); the status tabs themselves stay exclusive. 'opened' is a
@@ -1545,7 +1559,8 @@ class WPEL_Admin {
 		}
 		if ( '' !== $search ) {
 			$like         = '%' . $wpdb->esc_like( $search ) . '%';
-			$conditions[] = $wpdb->prepare( '(recipient LIKE %s OR subject LIKE %s OR from_address LIKE %s OR mailgun_message_id LIKE %s)', $like, $like, $like, $like );
+			// headers covers the visitor's address shown in the From column (see WPEL_Mailgun_Monitor::submitter()).
+			$conditions[] = $wpdb->prepare( '(recipient LIKE %s OR subject LIKE %s OR from_address LIKE %s OR headers LIKE %s OR mailgun_message_id LIKE %s)', $like, $like, $like, $like, $like );
 		}
 		$by_source = $conditions ? ' WHERE ' . implode( ' AND ', $conditions ) : '';
 
@@ -1674,14 +1689,23 @@ class WPEL_Admin {
 							</th>
 							<td><?php echo esc_html( $r->created_at ); ?></td>
 							<td><?php
-							// Stored as "Name <email>" or a bare address; show just the
-							// address, with the name in the tooltip. Older rows predate
-							// the column and unsent ones haven't been stamped yet.
-							$from = isset( $r->from_address ) ? (string) $r->from_address : '';
-							if ( '' === $from ) {
+							// Who it's from: the visitor a form email came from (its
+							// Reply-To, or the From that "Force from email" replaced),
+							// with the address it actually went out as underneath.
+							// from_address is stored as "Name <email>" or a bare
+							// address; older rows predate it and unsent ones haven't
+							// been stamped yet.
+							$from       = isset( $r->from_address ) ? (string) $r->from_address : '';
+							$from_email = preg_match( '/<([^>]+)>/', $from, $m ) ? $m[1] : $from;
+							$submitter  = $monitor->submitter( (string) $r->headers );
+							if ( '' !== $submitter ) {
+								printf( '<span title="Replies go to this address">%s</span>', esc_html( $submitter ) );
+								if ( '' !== $from_email && strtolower( $from_email ) !== strtolower( $submitter ) ) {
+									printf( '<br><span class="description" title="%1$s">sent as %2$s</span>', esc_attr( $from ), esc_html( $from_email ) );
+								}
+							} elseif ( '' === $from ) {
 								echo '&mdash;';
 							} else {
-								$from_email = preg_match( '/<([^>]+)>/', $from, $m ) ? $m[1] : $from;
 								printf( '<span title="%1$s">%2$s</span>', esc_attr( $from ), esc_html( $from_email ) );
 							}
 							?></td>
@@ -1900,7 +1924,11 @@ class WPEL_Admin {
 				var tbody = table.createTBody();
 
 				addRow( tbody, 'Logged', d.created_at );
-				addRow( tbody, 'From', d.from );
+				// Same as the log's From column: the visitor, then the address it went out as.
+				addRow( tbody, 'From', d.submitter || d.from );
+				if ( d.submitter && d.from.toLowerCase().indexOf( d.submitter.toLowerCase() ) < 0 ) {
+					addRow( tbody, 'Sent as', d.from );
+				}
 				addRow( tbody, 'To', d.recipient );
 				addRow( tbody, 'Subject', d.subject );
 				addRow( tbody, 'Status', d.status );

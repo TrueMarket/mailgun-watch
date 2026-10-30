@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Form Alert
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.18
+ * Version:     2.2.19
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -87,10 +87,14 @@
  *     the sources ticked under "Watched emails", e.g. one Forminator notification
  *     or HTML Forms email action: every row records what sent it (see
  *     includes/class-wpel-sources.php).
- *   - SUBMISSION TEXTS (needs SMS alerts): an email from a source ticked
- *     under "Watched emails" (the same list the unopened sweep covers) is
- *     texted as soon as it's captured, before it's sent, so a new form lead
- *     is seen right away. See notify_submission().
+ *   - SUBMISSION TEXTS (opt-in, needs SMS alerts): with "Submission texts"
+ *     ticked, an email from a source ticked under "Watched emails" (the same
+ *     list the unopened sweep covers) is texted as soon as it's captured,
+ *     before it's sent, so a new form lead is seen right away. See
+ *     notify_submission().
+ *   - DUPLICATE SUBMISSIONS: a form email identical to one sent in the last
+ *     two minutes (e.g. a double-clicked submit button) isn't sent, logged
+ *     or texted again. See find_duplicate().
  *   - Slack support still exists in the code (notify_slack() in
  *     class-wpel-monitor.php) but every call site is currently commented out
  *     in favor of Twilio SMS. Uncomment them to re-enable it alongside SMS.
@@ -126,7 +130,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.18' );
+define( 'WPEL_VERSION', '2.2.19' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

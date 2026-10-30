@@ -185,6 +185,24 @@ class WPEL_Mailer {
 	}
 
 	/**
+	 * Whether $email is one of this site's own addresses (the From email it
+	 * sends as, core's wordpress@ default, or the admin email, HTML Forms'
+	 * default From) rather than a visitor's. Case-insensitive.
+	 *
+	 * @param string $email
+	 * @return bool
+	 */
+	public function is_own_address( $email ) {
+		$email = strtolower( trim( (string) $email ) );
+		foreach ( array( $this->from_email, $this->core_default_from(), get_option( 'admin_email' ) ) as $own ) {
+			if ( $email === strtolower( trim( (string) $own ) ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * pre_wp_mail callback. Returning null lets wp_mail() proceed with
 	 * PHPMailer (SMTP fallback, or WordPress's default transport when that
 	 * isn't set up either); returning true/false short-circuits wp_mail()
@@ -195,14 +213,21 @@ class WPEL_Mailer {
 	 * @return null|bool
 	 */
 	public function send( $null, $atts ) {
+		$monitor = WPEL_Mailgun_Monitor::instance();
+
+		if ( $monitor->consume_duplicate() ) {
+			// A double submission: the identical email went out moments ago, so
+			// report success without sending it again, on any transport.
+			return true;
+		}
+
 		if ( 'api' !== $this->transport() ) {
 			// Leave the pending row for the monitor's wp_mail_succeeded /
 			// wp_mail_failed handlers, which see how PHPMailer's send went.
 			return null;
 		}
 
-		$monitor = WPEL_Mailgun_Monitor::instance();
-		$row_id  = $monitor->consume_last_row_id();
+		$row_id = $monitor->consume_last_row_id();
 
 		$to          = isset( $atts['to'] ) ? $atts['to'] : '';
 		$subject     = isset( $atts['subject'] ) ? $atts['subject'] : '';

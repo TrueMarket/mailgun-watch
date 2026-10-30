@@ -220,9 +220,9 @@ class WPEL_Sources {
 	/* -------------------------------------------------------------------- */
 
 	/**
-	 * Sources ticked under "Watched emails". Each gets a text as soon as it's
-	 * sent (with SMS alerts on) and an alert if it goes unopened (with Track
-	 * opens on). Empty means neither kind of alert is sent.
+	 * Sources ticked under "Watched emails". Each gets an alert if it goes
+	 * unopened (with Track opens on) and a text as soon as it's sent (with
+	 * Submission texts on). Empty means neither kind of alert is sent.
 	 *
 	 * Older versions saved two separate lists, unopened_watch and
 	 * submission_watch, as source => page id. Until the settings are next

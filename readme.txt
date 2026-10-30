@@ -2,7 +2,7 @@
 Contributors: jimlaroche
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
-Stable tag: 2.2.18
+Stable tag: 2.2.19
 
 Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, reconciles delivery via Mailgun webhooks, and alerts on failure.
 
@@ -11,6 +11,13 @@ Sends outgoing WordPress email through the Mailgun HTTP API, logs every send, re
 Form Alert replaces WP Mail SMTP (or any other SMTP plugin) as the mail transport, sending directly through Mailgun's HTTP API. Every send is logged and reconciled against Mailgun's webhook events (delivered vs. bounced vs. complained), and failures trigger alerts by email and SMS (Twilio). Sites without their own Mailgun domain yet send through a shared Mailgun SMTP fallback, with no delivery or open tracking. See README.md in the plugin folder for full setup and configuration details.
 
 == Changelog ==
+
+= 2.2.19 =
+* Stopped double submissions from sending twice: a form email identical to one sent in the last two minutes was no longer sent, logged or texted, and was noted as duplicate_suppressed on the original (filterable via wpel_duplicate_window)
+* Added a Submission texts setting, off by default, so watched emails were only texted as they were sent when it was ticked; previously every watched email was texted, even ones only ticked for unopened alerts
+* Changed the Email Log's From column and View modal to show the visitor's address (from the Reply-To, or the From the form set), with the address it was sent as underneath
+* Added the visitor's address to the Email Log search
+* Fixed the "Submitted by" line missing from texts when a form put the visitor's email in the From header instead of Reply-To
 
 = 2.2.18 =
 * Added a Copy link button to the email viewer in the Email Log that copied a shareable link to the open email

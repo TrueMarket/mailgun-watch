@@ -44,6 +44,9 @@ class WPEL_Mailgun_Monitor {
 	/** Most alert texts sent per hour (filterable: wpel_sms_max_per_hour). */
 	const SMS_MAX_PER_HOUR = 10;
 
+	/** Seconds an identical form email counts as a duplicate submission (filterable: wpel_duplicate_window), see find_duplicate(). */
+	const DUPLICATE_WINDOW = 120;
+
 	/**
 	 * Row id created in the wp_mail filter, consumed by WPEL_Mailer's pre_wp_mail
 	 * hook. The two fire in sequence within a single wp_mail() call ('wp_mail'
@@ -64,6 +67,15 @@ class WPEL_Mailgun_Monitor {
 	 * @var bool
 	 */
 	private $last_is_skip = false;
+
+	/**
+	 * True while the current wp_mail() call repeats a form email sent moments
+	 * ago (see find_duplicate()), so WPEL_Mailer::send() drops it instead of
+	 * sending it again.
+	 *
+	 * @var bool
+	 */
+	private $last_is_duplicate = false;
 
 	public static function instance() {
 		if ( ! self::$instance ) {
@@ -135,8 +147,9 @@ class WPEL_Mailgun_Monitor {
 	public function capture_outgoing( $args ) {
 		// Reset first so a skipped (alert) email or a non-wp_mail send can't leave
 		// a stale id for the next pre_wp_mail call (WPEL_Mailer::send()) to mis-attribute.
-		$this->last_row_id  = 0;
-		$this->last_is_skip = false;
+		$this->last_row_id       = 0;
+		$this->last_is_skip      = false;
+		$this->last_is_duplicate = false;
 
 		// Normalize headers to an array of strings (for logging only).
 		$headers = isset( $args['headers'] ) ? $args['headers'] : array();
@@ -160,14 +173,24 @@ class WPEL_Mailgun_Monitor {
 			$to = implode( ', ', $to );
 		}
 
-		$source = WPEL_Sources::instance()->current();
+		$source  = WPEL_Sources::instance()->current();
+		$subject = isset( $args['subject'] ) ? (string) $args['subject'] : '';
+		$body    = isset( $args['message'] ) ? (string) $args['message'] : '';
+
+		// The same submission arriving twice: not sent, logged or texted again.
+		$original = $this->find_duplicate( $source['source'], $to, $subject, $body );
+		if ( $original ) {
+			$this->last_is_duplicate = true;
+			$this->log_event( $original, 'duplicate_suppressed' );
+			return $args;
+		}
 
 		$this->last_row_id = $this->insert_row(
 			array(
 				'recipient'   => $to,
-				'subject'     => isset( $args['subject'] ) ? $args['subject'] : '',
+				'subject'     => $subject,
 				'headers'     => wp_json_encode( $headers ),
-				'body'        => isset( $args['message'] ) ? $args['message'] : '',
+				'body'        => $body,
 				'status'      => 'pending',
 				'source'      => $source['source'],
 				'source_page' => $source['page'],
@@ -192,6 +215,56 @@ class WPEL_Mailgun_Monitor {
 		$this->last_row_id  = 0;
 		$this->last_is_skip = false;
 		return $row_id;
+	}
+
+	/**
+	 * Whether the wp_mail() call in progress is a duplicate that
+	 * capture_outgoing() chose not to log; reads and resets the flag. Called
+	 * once per wp_mail() call by WPEL_Mailer's pre_wp_mail hook.
+	 *
+	 * @return bool
+	 */
+	public function consume_duplicate() {
+		$is_duplicate            = $this->last_is_duplicate;
+		$this->last_is_duplicate = false;
+		return $is_duplicate;
+	}
+
+	/**
+	 * A form email identical to this one (same form email, recipient,
+	 * subject and message) sent in the last DUPLICATE_WINDOW seconds: the
+	 * same submission arriving twice, usually a double-clicked submit button
+	 * (HTML Forms doesn't disable it while the form is sending). A failed one
+	 * doesn't count, so a retry after a failure still goes out. Only form
+	 * plugin emails are checked; anything else may legitimately repeat.
+	 *
+	 * @return int The earlier row's id, or 0.
+	 */
+	private function find_duplicate( $source, $to, $subject, $body ) {
+		global $wpdb;
+		$window = (int) apply_filters( 'wpel_duplicate_window', self::DUPLICATE_WINDOW );
+		if ( $window <= 0 || ! WPEL_Sources::is_form( $source ) ) {
+			return 0;
+		}
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, body FROM " . self::table() . "
+				 WHERE source = %s AND recipient = %s AND subject = %s AND status <> 'failed' AND created_at >= %s
+				 ORDER BY id DESC LIMIT 10",
+				$source,
+				$to,
+				$subject,
+				$this->local_mysql_time( time() - $window )
+			)
+		);
+		// Compared here rather than in SQL, where the column's collation would
+		// ignore case and trailing spaces.
+		foreach ( (array) $rows as $row ) {
+			if ( (string) $row->body === $body ) {
+				return (int) $row->id;
+			}
+		}
+		return 0;
 	}
 
 	/**
@@ -1024,7 +1097,8 @@ class WPEL_Mailgun_Monitor {
 	 * Texts the alert numbers as soon as an email ticked under "Watched
 	 * emails" (WPEL_Sources::watched()) is about to go out, typically a form's
 	 * notification to the team, so a new lead is seen without waiting for the
-	 * email. Needs SMS alerts on. Runs before the send, so the text still
+	 * email. Needs SMS alerts and "Submission texts" on (see
+	 * submission_texts_enabled()). Runs before the send, so the text still
 	 * goes out if the email then fails (which alerts separately). Counts
 	 * toward the hourly text limit like any other alert.
 	 *
@@ -1034,7 +1108,7 @@ class WPEL_Mailgun_Monitor {
 	 * @param array    $source From WPEL_Sources::current().
 	 */
 	private function notify_submission( $row_id, $to, $headers, $source ) {
-		if ( ! $row_id || ! $this->sms_enabled() || ! WPEL_Sources::is_watched( $source['source'] ) ) {
+		if ( ! $row_id || ! $this->submission_texts_enabled() || ! WPEL_Sources::is_watched( $source['source'] ) ) {
 			return;
 		}
 
@@ -1056,6 +1130,18 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
+	 * Whether watched emails are texted as they're sent: SMS alerts on and
+	 * "Submission texts" ticked. Off unless ticked: 2.2.14 to 2.2.18 texted
+	 * every watched email, including ones only ticked for unopened alerts.
+	 *
+	 * @param array|null $o Settings to check; null for the saved ones.
+	 */
+	public function submission_texts_enabled( $o = null ) {
+		$o = $this->settings( $o );
+		return $this->sms_enabled( $o ) && ! empty( $o['submission_texts'] );
+	}
+
+	/**
 	 * How the submission and unopened texts describe a watched email: a form
 	 * submission when it's from a form plugin or was sent from a page (e.g.
 	 * Contact Form 7's REST posts), named by that page; otherwise a watched
@@ -1074,22 +1160,38 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * The visitor's address from a form notification's Reply-To header, which
-	 * form plugins set to the email the visitor entered; '' when there's none.
+	 * The visitor's address on a form notification: its Reply-To header,
+	 * else the From header the form set (e.g. HTML Forms' From: [EMAIL]),
+	 * which "Force from email" swaps for the site's own address and keeps as
+	 * the Reply-To (see WPEL_Mailer). '' when there's neither, or the From is
+	 * just one of the site's own addresses.
 	 *
 	 * @param string[]|string $headers Header lines, or the log's JSON copy of them.
 	 */
-	private function submitter( $headers ) {
+	public function submitter( $headers ) {
 		if ( is_string( $headers ) ) {
 			$headers = json_decode( $headers, true );
 		}
+		$from = '';
 		foreach ( (array) $headers as $h ) {
-			if ( is_string( $h ) && 0 === stripos( $h, 'reply-to:' ) ) {
-				$value = trim( substr( $h, 9 ) );
-				return preg_match( '/<([^>]+)>/', $value, $m ) ? trim( $m[1] ) : $value;
+			if ( ! is_string( $h ) || false === strpos( $h, ':' ) ) {
+				continue;
+			}
+			list( $name, $value ) = explode( ':', $h, 2 );
+			$name  = strtolower( trim( $name ) );
+			$value = trim( $value );
+			if ( '' === $value ) {
+				continue;
+			}
+			$address = preg_match( '/<([^>]+)>/', $value, $m ) ? trim( $m[1] ) : $value;
+			if ( 'reply-to' === $name ) {
+				return $address;
+			}
+			if ( 'from' === $name && '' === $from ) {
+				$from = $address;
 			}
 		}
-		return '';
+		return ( '' !== $from && ! WPEL_Mailer::instance()->is_own_address( $from ) ) ? $from : '';
 	}
 
 	/* -------------------------------------------------------------------- */

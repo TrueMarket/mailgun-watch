@@ -164,10 +164,11 @@ class WPEL_Activator {
 			// after sending (always later than unopened_hours).
 			'unopened_second'       => 0,
 			'unopened_second_hours' => 48,
-			// "Watched emails" (a list of sources, see WPEL_Sources): texted as
-			// soon as they're sent (needs SMS alerts on), and the only emails
-			// unopened alerts cover. Empty = neither kind of alert.
+			// "Watched emails" (a list of sources, see WPEL_Sources): the only
+			// emails unopened alerts cover, and texted as soon as they're sent
+			// with submission_texts (and SMS alerts) on. Empty = neither kind of alert.
 			'watched_sources'  => array(),
+			'submission_texts' => 0,
 		);
 		$existing = get_option( WPEL_OPTION, array() );
 		if ( is_array( $existing ) && ! isset( $existing['watched_sources'] ) ) {
