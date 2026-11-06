@@ -20,6 +20,13 @@ class WPEL_Admin {
 	const SETUP_STATUS_OPTION = 'wpel_setup_status';
 
 	/**
+	 * Alert-email overlap warnings dismissed from the Settings page, as
+	 * alert_email_overlaps() keys. Kept outside WPEL_OPTION for the same
+	 * reason as SETUP_STATUS_OPTION. See handle_dismiss_alert_overlap().
+	 */
+	const DISMISSED_OVERLAPS_OPTION = 'wpel_dismissed_alert_overlaps';
+
+	/**
 	 * Stand-in value printed into a secret field (SMTP password, Twilio auth
 	 * token) once one is saved, so it shows as a filled-in password without
 	 * the real secret ever reaching the page source. Submitting it unchanged
@@ -63,6 +70,7 @@ class WPEL_Admin {
 		add_action( 'admin_notices', array( $this, 'test_email_notice' ) );
 		add_action( 'admin_post_wpel_send_test_sms', array( $this, 'handle_send_test_sms' ) );
 		add_action( 'admin_notices', array( $this, 'test_sms_notice' ) );
+		add_action( 'admin_post_wpel_dismiss_alert_overlap', array( $this, 'handle_dismiss_alert_overlap' ) );
 		add_action( 'admin_post_wpel_check_mailgun_config', array( $this, 'handle_check_mailgun_config' ) );
 		add_action( 'admin_notices', array( $this, 'mailgun_config_check_notice' ) );
 		add_action( 'wp_ajax_wpel_log_entry', array( $this, 'ajax_log_entry' ) );
@@ -734,7 +742,7 @@ class WPEL_Admin {
 		$track_opens      = ! empty( $o['track_opens'] );
 		$unopened_second  = ! empty( $o['unopened_second'] );
 		$form_plugins     = WPEL_Sources::instance()->form_plugins();
-		$alert_overlaps   = $this->alert_email_overlaps( $o, $form_plugins );
+		$alert_overlaps   = $this->undismissed_overlaps( $this->alert_email_overlaps( $o, $form_plugins ) );
 		?>
 		<div class="wrap">
 			<?php $this->render_logo(); ?>
@@ -784,7 +792,11 @@ class WPEL_Admin {
 											<li><?php echo esc_html( $overlap['form'] . ' → ' . $overlap['email'] ); ?> goes to <strong><?php echo esc_html( $overlap['recipient'] ); ?></strong>, <?php echo $overlap['same_address'] ? 'the same address as the alert email' : 'on the same domain as the alert email'; ?></li>
 										<?php endforeach; ?>
 									</ul>
-									<p>Add an address on a different domain, such as your web developer's, and save.</p>
+									<p>Add an address on a different domain, such as your web developer's, and save. If these forms are meant to go to the alert email, you can dismiss this warning instead. It comes back if another form email starts going there.</p>
+									<?php // Submits to the standalone form below via form="", like Send test email. ?>
+									<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_dismiss_alert_overlap' ) ); ?>" form="wpel-dismiss-overlap-form">
+									<input type="hidden" name="action" value="wpel_dismiss_alert_overlap" form="wpel-dismiss-overlap-form">
+									<p><button type="submit" class="button" form="wpel-dismiss-overlap-form">Dismiss warning</button></p>
 								</div>
 							<?php endif; ?></td>
 						</tr>
@@ -977,6 +989,7 @@ class WPEL_Admin {
 
 			<form id="wpel-test-email-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"></form>
 			<form id="wpel-test-sms-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"></form>
+			<form id="wpel-dismiss-overlap-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"></form>
 
 			</div>
 			<?php $this->render_setup_checklist( $o ); ?>
@@ -1231,7 +1244,9 @@ class WPEL_Admin {
 	 * since there's no telling where they go.
 	 *
 	 * @param array $plugins WPEL_Sources::form_plugins().
-	 * @return array[] { form, email, recipient, same_address: bool }
+	 * @return array[] { key, form, email, recipient, same_address: bool },
+	 *                 key being the form email's source and the recipient,
+	 *                 for dismissing (see undismissed_overlaps()).
 	 */
 	private function alert_email_overlaps( $o, $plugins ) {
 		$alert = ! empty( $o['alert_email'] ) ? $o['alert_email'] : get_option( 'admin_email' );
@@ -1254,6 +1269,7 @@ class WPEL_Admin {
 					}
 					foreach ( $at_risk as $recipient => $same_address ) {
 						$out[] = array(
+							'key'          => $email['source'] . '|' . $recipient,
 							'form'         => $form['name'],
 							'email'        => $email['label'],
 							'recipient'    => $recipient,
@@ -1264,6 +1280,46 @@ class WPEL_Admin {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * The overlaps still to warn about: those not dismissed with "Dismiss
+	 * warning". A dismissal covers one form email and recipient, so a new
+	 * one (another form, or the same form sending to another at-risk
+	 * address) shows the warning again.
+	 *
+	 * @param array[] $overlaps From alert_email_overlaps().
+	 * @return array[]
+	 */
+	private function undismissed_overlaps( $overlaps ) {
+		$dismissed = (array) get_option( self::DISMISSED_OVERLAPS_OPTION, array() );
+		$out       = array();
+		foreach ( $overlaps as $overlap ) {
+			if ( ! in_array( $overlap['key'], $dismissed, true ) ) {
+				$out[] = $overlap;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * "Dismiss warning" under Alert email recipient: remembers every overlap
+	 * there is now, from the saved settings the page was showing. The list
+	 * is replaced rather than added to, so one that stops applying (its form
+	 * email changed, or an alert address on another domain was added) warns
+	 * again if it ever comes back.
+	 */
+	public function handle_dismiss_alert_overlap() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wpel' ) );
+		}
+		check_admin_referer( 'wpel_dismiss_alert_overlap' );
+
+		$overlaps = $this->alert_email_overlaps( get_option( WPEL_OPTION, array() ), WPEL_Sources::instance()->form_plugins() );
+		update_option( self::DISMISSED_OVERLAPS_OPTION, wp_list_pluck( $overlaps, 'key' ), false );
+
+		wp_safe_redirect( add_query_arg( 'page', 'wpel-settings', admin_url( 'admin.php' ) ) );
+		exit;
 	}
 
 	/**
