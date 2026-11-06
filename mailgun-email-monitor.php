@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Form Alert
  * Description: Sends all outgoing email directly through the Mailgun HTTP API (no SMTP plugin required), logs every send, reconciles real delivery status via Mailgun webhooks, flags failures, and alerts by email + SMS (Twilio).
- * Version:     2.2.19
+ * Version:     2.2.20
  * Author:      True Market
  * Author URI:  https://truemarket.ca
  * License:     GPL-2.0-or-later
@@ -87,7 +87,7 @@
  *     the sources ticked under "Watched emails", e.g. one Forminator notification
  *     or HTML Forms email action: every row records what sent it (see
  *     includes/class-wpel-sources.php).
- *   - SUBMISSION TEXTS (opt-in, needs SMS alerts): with "Submission texts"
+ *   - SUBMISSION TEXTS (opt-in, independent of SMS alerts): with "Submission texts"
  *     ticked, an email from a source ticked under "Watched emails" (the same
  *     list the unopened sweep covers) is texted as soon as it's captured,
  *     before it's sent, so a new form lead is seen right away. See
@@ -107,9 +107,9 @@
  *     Mailgun API key created just for this site (so it can be revoked
  *     without affecting other sites).
  *   - Set the default From name/email (must be on a domain verified in Mailgun).
- *   - On the Alerting & Logging tab, set the alert email recipient and/or
- *     tick "Enable SMS alerts" and fill in the Twilio credentials and the
- *     phone number(s) that should receive SMS alerts.
+ *   - On the General tab, set the alert email recipient and/or the alert
+ *     phone number(s) with "Enable SMS alerts" ticked, then fill in the
+ *     Twilio credentials on the Alerting & Logging tab.
  *   - In the Mailgun dashboard (Send -> Webhooks -> Add webhook ->
  *     Domain-level, pick this site's domain), add a webhook pointing at:
  *       https://YOURSITE/wp-json/wpel/v1/mailgun-webhook
@@ -130,7 +130,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WPEL_VERSION', '2.2.19' );
+define( 'WPEL_VERSION', '2.2.20' );
 define( 'WPEL_OPTION', 'wpel_settings' );
 define( 'WPEL_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPEL_FILE', __FILE__ );

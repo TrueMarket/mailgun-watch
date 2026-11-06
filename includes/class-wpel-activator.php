@@ -57,7 +57,8 @@ class WPEL_Activator {
 	 * first request following an update (single option read + string compare).
 	 */
 	public static function maybe_upgrade() {
-		if ( get_option( 'wpel_db_version' ) === WPEL_VERSION ) {
+		$previous = get_option( 'wpel_db_version' );
+		if ( $previous === WPEL_VERSION ) {
 			return;
 		}
 		self::create_or_upgrade_table();
@@ -65,6 +66,28 @@ class WPEL_Activator {
 		self::ensure_cron_scheduled();
 		self::drop_alert_unopened();
 		self::drop_unopened_channel();
+		self::decouple_submission_texts( $previous );
+	}
+
+	/**
+	 * Submission texts needed SMS alerts on in 2.2.19; they're now their own
+	 * switch. A site that had them ticked with SMS alerts off wasn't getting
+	 * them, so untick them there instead of starting to text on update.
+	 * Runs once, on the update from 2.2.19 or earlier (the setting is new in
+	 * 2.2.19, so there's nothing to do before it).
+	 *
+	 * @param string|false $previous wpel_db_version before this update.
+	 */
+	private static function decouple_submission_texts( $previous ) {
+		if ( ! $previous || version_compare( $previous, '2.2.20', '>=' ) ) {
+			return;
+		}
+		$o = get_option( WPEL_OPTION, array() );
+		if ( ! is_array( $o ) || empty( $o['submission_texts'] ) || WPEL_Mailgun_Monitor::instance()->sms_enabled( $o ) ) {
+			return;
+		}
+		$o['submission_texts'] = 0;
+		update_option( WPEL_OPTION, $o );
 	}
 
 	/**
@@ -166,7 +189,7 @@ class WPEL_Activator {
 			'unopened_second_hours' => 48,
 			// "Watched emails" (a list of sources, see WPEL_Sources): the only
 			// emails unopened alerts cover, and texted as soon as they're sent
-			// with submission_texts (and SMS alerts) on. Empty = neither kind of alert.
+			// with submission_texts on. Empty = neither kind of alert.
 			'watched_sources'  => array(),
 			'submission_texts' => 0,
 		);

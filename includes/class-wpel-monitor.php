@@ -692,18 +692,20 @@ class WPEL_Mailgun_Monitor {
 		// );
 
 		// 1b) SMS via Twilio — same trigger, independent channel, survives an email outage.
-		$this->notify_twilio(
-			sprintf(
-				"Your website form isn't sending your email notifications properly - %s\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%sFurther failures in the next hour won't be texted.\n%s",
-				$host,
-				$recipient,
-				$subject,
-				$reason,
-				$this->failure_source( $row_id, $source ),
-				$repeats,
-				admin_url( 'admin.php?page=wpel-log' )
-			)
-		);
+		if ( $this->sms_enabled() ) {
+			$this->notify_twilio(
+				sprintf(
+					"Your website form isn't sending your email notifications properly - %s\nTo: %s\nSubject: %s\nReason: %s\nSource: %s\n%sFurther failures in the next hour won't be texted.\n%s",
+					$host,
+					$recipient,
+					$subject,
+					$reason,
+					$this->failure_source( $row_id, $source ),
+					$repeats,
+					admin_url( 'admin.php?page=wpel-log' )
+				)
+			);
+		}
 
 		// 2) Escalate: whole-site email outage. The alert email cannot get out
 		//    in this state, so this specifically leans on the Twilio SMS channel.
@@ -831,22 +833,26 @@ class WPEL_Mailgun_Monitor {
 		// 	"Check Mailgun status/credentials and the plugin log: " . admin_url( 'admin.php?page=wpel-log' )
 		// );
 
-		$this->notify_twilio(
-			sprintf(
-				"%s - POSSIBLE EMAIL NOTIFICATION OUTAGE\nMultiple email notifications have been sent with no successful delivery in the last %d minutes. This could be a website issue, or an issue with your email.\nContact True Market for website assistance ( communications@truemarket.io ) and your IT provider for email assistance.\n%s",
-				$host,
-				$window,
-				admin_url( 'admin.php?page=wpel-log' )
-			),
-			true // already throttled above, and it's the one text that must get through
-		);
+		if ( $this->sms_enabled() ) {
+			$this->notify_twilio(
+				sprintf(
+					"%s - POSSIBLE EMAIL NOTIFICATION OUTAGE\nMultiple email notifications have been sent with no successful delivery in the last %d minutes. This could be a website issue, or an issue with your email.\nContact True Market for website assistance ( communications@truemarket.io ) and your IT provider for email assistance.\n%s",
+					$host,
+					$window,
+					admin_url( 'admin.php?page=wpel-log' )
+				),
+				true // already throttled above, and it's the one text that must get through
+			);
+		}
 	}
 
 	/**
-	 * Whether SMS alerts are switched on in Settings. Installs saved before
-	 * the toggle existed have no sms_enabled key; they count as enabled if
-	 * they already had alert phone numbers, so upgrading doesn't silently
-	 * stop their texts.
+	 * Whether SMS alerts are switched on in Settings: failure and outage
+	 * texts, and unopened alerts by text instead of email (see
+	 * unopened_channel()). Submission texts have their own switch, see
+	 * submission_texts_enabled(). Installs saved before the toggle existed
+	 * have no sms_enabled key; they count as enabled if they already had
+	 * alert phone numbers, so upgrading doesn't silently stop their texts.
 	 */
 	public function sms_enabled( $o = null ) {
 		$o = $this->settings( $o );
@@ -902,15 +908,15 @@ class WPEL_Mailgun_Monitor {
 	 * Recipients need nothing beyond a phone that can receive texts — no app,
 	 * no account, no subscribing to anything.
 	 *
+	 * Callers check that their kind of text is turned on first: SMS alerts
+	 * (sms_enabled()) or submission texts (submission_texts_enabled()).
+	 *
 	 * @param string $body
 	 * @param bool   $bypass_limit Send even past the hourly limit (still counted).
-	 * @return bool Whether the text was handed to Twilio (false: SMS off,
-	 *              not configured, or over the hourly limit).
+	 * @return bool Whether the text was handed to Twilio (false: not
+	 *              configured, or over the hourly limit).
 	 */
 	private function notify_twilio( $body, $bypass_limit = false ) {
-		if ( ! $this->sms_enabled() ) {
-			return false;
-		}
 		$creds = $this->get_twilio_credentials();
 		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
 			return false;
@@ -1010,16 +1016,7 @@ class WPEL_Mailgun_Monitor {
 	 *         numbers saved).
 	 */
 	public function send_test_sms( $body ) {
-		if ( ! $this->sms_enabled() ) {
-			return array(
-				array(
-					'to'     => '',
-					'ok'     => false,
-					'detail' => 'SMS alerts are turned off — tick "Enable SMS alerts" on the General tab, save, then try again.',
-				),
-			);
-		}
-
+		// Works with SMS alerts off too: the numbers also get submission texts.
 		$creds = $this->get_twilio_credentials();
 		if ( ! $creds['account_sid'] || ! $creds['sid'] || ! $creds['auth_token'] || ! $creds['from_number'] ) {
 			return array(
@@ -1097,7 +1094,7 @@ class WPEL_Mailgun_Monitor {
 	 * Texts the alert numbers as soon as an email ticked under "Watched
 	 * emails" (WPEL_Sources::watched()) is about to go out, typically a form's
 	 * notification to the team, so a new lead is seen without waiting for the
-	 * email. Needs SMS alerts and "Submission texts" on (see
+	 * email. Needs "Submission texts" on, but not SMS alerts (see
 	 * submission_texts_enabled()). Runs before the send, so the text still
 	 * goes out if the email then fails (which alerts separately). Counts
 	 * toward the hourly text limit like any other alert.
@@ -1130,15 +1127,17 @@ class WPEL_Mailgun_Monitor {
 	}
 
 	/**
-	 * Whether watched emails are texted as they're sent: SMS alerts on and
-	 * "Submission texts" ticked. Off unless ticked: 2.2.14 to 2.2.18 texted
-	 * every watched email, including ones only ticked for unopened alerts.
+	 * Whether watched emails are texted as they're sent: "Submission texts"
+	 * ticked, whether or not SMS alerts are on (2.2.19 also needed SMS
+	 * alerts, see WPEL_Activator::decouple_submission_texts()). Off unless
+	 * ticked: 2.2.14 to 2.2.18 texted every watched email, including ones
+	 * only ticked for unopened alerts.
 	 *
 	 * @param array|null $o Settings to check; null for the saved ones.
 	 */
 	public function submission_texts_enabled( $o = null ) {
 		$o = $this->settings( $o );
-		return $this->sms_enabled( $o ) && ! empty( $o['submission_texts'] );
+		return ! empty( $o['submission_texts'] );
 	}
 
 	/**

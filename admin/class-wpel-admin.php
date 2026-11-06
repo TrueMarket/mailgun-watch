@@ -27,6 +27,28 @@ class WPEL_Admin {
 	 */
 	const SAVED_SECRET_MASK = '••••••••••••';
 
+	/**
+	 * Big webmail domains, where sharing a domain with a form's recipient
+	 * isn't a shared point of failure — see alert_email_overlaps().
+	 */
+	const SHARED_MAIL_DOMAINS = array(
+		'gmail.com',
+		'googlemail.com',
+		'outlook.com',
+		'hotmail.com',
+		'live.com',
+		'msn.com',
+		'yahoo.com',
+		'icloud.com',
+		'me.com',
+		'mac.com',
+		'aol.com',
+		'proton.me',
+		'protonmail.com',
+		'gmx.com',
+		'zoho.com',
+	);
+
 	public static function instance() {
 		if ( ! self::$instance ) {
 			self::$instance = new self();
@@ -711,6 +733,8 @@ class WPEL_Admin {
 		$submission_texts = ! empty( $o['submission_texts'] );
 		$track_opens      = ! empty( $o['track_opens'] );
 		$unopened_second  = ! empty( $o['unopened_second'] );
+		$form_plugins     = WPEL_Sources::instance()->form_plugins();
+		$alert_overlaps   = $this->alert_email_overlaps( $o, $form_plugins );
 		?>
 		<div class="wrap">
 			<?php $this->render_logo(); ?>
@@ -751,23 +775,34 @@ class WPEL_Admin {
 							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_email' ) ); ?>" form="wpel-test-email-form">
 							<input type="hidden" name="action" value="wpel_send_test_email" form="wpel-test-email-form">
 							<button type="submit" class="button" form="wpel-test-email-form" style="margin-left:8px;">Send test email</button>
-							<p class="description">Who gets an email when something goes wrong. Separate several addresses with commas. If left blank, alerts go to the site's admin email shown in the box. Save your changes before sending a test.</p></td>
+							<p class="description">Who gets an email when something goes wrong. Use an address your forms don't send to, ideally on a different domain (for example, your web developer's), so alerts still arrive if those emails are bouncing. Separate several addresses with commas. If left blank, alerts go to the site's admin email shown in the box. Save your changes before sending a test.</p>
+							<?php if ( $alert_overlaps ) : ?>
+								<div class="notice notice-warning inline wpel-alert-overlap">
+									<p><strong>Alerts might not reach you.</strong> If emails to these addresses start bouncing, the alert about it would probably bounce too:</p>
+									<ul>
+										<?php foreach ( $alert_overlaps as $overlap ) : ?>
+											<li><?php echo esc_html( $overlap['form'] . ' → ' . $overlap['email'] ); ?> goes to <strong><?php echo esc_html( $overlap['recipient'] ); ?></strong>, <?php echo $overlap['same_address'] ? 'the same address as the alert email' : 'on the same domain as the alert email'; ?></li>
+										<?php endforeach; ?>
+									</ul>
+									<p>Add an address on a different domain, such as your web developer's, and save.</p>
+								</div>
+							<?php endif; ?></td>
 						</tr>
 						<tr>
-							<th scope="row">SMS alerts</th>
-							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
-							<p class="description">Also send alerts by text message, so you still hear about problems when email isn't working.</p></td>
-						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
 							<th scope="row"><label for="wpel_twilio_to">Alert phone numbers</label></th>
 							<td><input name="<?php echo esc_attr( WPEL_OPTION ); ?>[twilio_to_numbers]" id="wpel_twilio_to" type="text" class="regular-text" value="<?php echo esc_attr( isset( $o['twilio_to_numbers'] ) ? $o['twilio_to_numbers'] : '' ); ?>" placeholder="555-123-4567, 555-987-6543">
 							<?php // Submits to the standalone form below via form="" — a real <form> can't nest inside this page's main settings form. ?>
 							<input type="hidden" name="_wpnonce" value="<?php echo esc_attr( wp_create_nonce( 'wpel_send_test_sms' ) ); ?>" form="wpel-test-sms-form">
 							<input type="hidden" name="action" value="wpel_send_test_sms" form="wpel-test-sms-form">
 							<button type="submit" class="button" form="wpel-test-sms-form" style="margin-left:8px;">Send test SMS</button>
-							<p class="description">Mobile numbers that get the text alerts. Separate several numbers with commas. Save your changes before sending a test.</p></td>
+							<p class="description">Use the number of someone who replies to new form submissions, such as a member of your sales team, so they hear right away when an enquiry needs attention. Separate several numbers with commas. Save your changes before sending a test.</p></td>
 						</tr>
-						<tr class="wpel-sms-row"<?php echo $sms_enabled ? '' : ' style="display:none"'; ?>>
+						<tr>
+							<th scope="row">SMS alerts</th>
+							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[sms_enabled]" id="wpel_sms_enabled" value="1" <?php checked( $sms_enabled ); ?>> Enable SMS alerts</label>
+							<p class="description">Get a text when one of your website's emails can't be delivered, or when the site stops sending email altogether, so you still find out even when alert emails can't get through.</p></td>
+						</tr>
+						<tr>
 							<th scope="row">Submission texts</th>
 							<td><label><input type="checkbox" name="<?php echo esc_attr( WPEL_OPTION ); ?>[submission_texts]" id="wpel_submission_texts" value="1" <?php checked( $submission_texts ); ?>> Text me as soon as a watched email is sent</label>
 							<p class="description">For a form, that's the moment someone submits it, so a new enquiry is seen right away. Leave this off to only hear about watched emails that go unopened.</p></td>
@@ -786,9 +821,9 @@ class WPEL_Admin {
 							</div></td>
 						</tr>
 						<?php // Only does anything with Track opens or submission texts on, so only shown while either is. ?>
-						<tr class="wpel-watch-row"<?php echo ( $track_opens || ( $sms_enabled && $submission_texts ) ) ? '' : ' style="display:none"'; ?>>
-							<th scope="row">Watched emails</th>
-							<td><?php $watched_forms = $this->render_watch( $o ); ?></td>
+						<tr class="wpel-watch-row"<?php echo ( $track_opens || $submission_texts ) ? '' : ' style="display:none"'; ?>>
+							<th scope="row">Watched forms</th>
+							<td><?php $watched_forms = $this->render_watch( $o, $form_plugins ); ?></td>
 						</tr>
 					</table>
 				</div>
@@ -866,7 +901,7 @@ class WPEL_Admin {
 
 				<div id="wpel-tab-alerting" class="wpel-tab-panel" style="display:none">
 					<h2 class="title">Twilio (SMS)</h2>
-					<p class="description">Used to send SMS alerts. Turn SMS alerts on, and set the numbers they go to, on the General tab.</p>
+					<p class="description">Used to send texts. Set the numbers they go to, and which texts to send, on the General tab.</p>
 					<table class="form-table" role="presentation">
 						<tr>
 							<th scope="row"><label for="wpel_twilio_account_sid">Twilio Account SID</label></th>
@@ -933,7 +968,7 @@ class WPEL_Admin {
 					<hr style="margin:24px 0;">
 
 					<h2 class="title">Other watched emails</h2>
-					<p class="description">Emails that don't come from a Forminator or HTML Forms form, listed once they've been sent at least once. A ticked one works like a form ticked under "Watched emails" on the General tab: an alert if it isn't opened (with Track opens on) and a text when it's sent (with Submission texts on).</p>
+					<p class="description">Emails that don't come from a Forminator or HTML Forms form, listed once they've been sent at least once. A ticked one works like a form ticked under "Watched forms" on the General tab: an alert if it isn't opened (with Track opens on) and a text when it's sent (with Submission texts on).</p>
 					<?php $this->render_other_watch( $o, $watched_forms ); ?>
 				</div>
 
@@ -960,6 +995,8 @@ class WPEL_Admin {
 			#wpel-unopened-watch h4:first-child { margin-top: 0; }
 			.wpel-watch-group { margin: 0 0 10px; padding: 8px 10px; background: #f6f7f7; border: 1px solid #dcdcde; }
 			.wpel-watch-email { display: block; margin-top: 6px; }
+			.wpel-alert-overlap { max-width: 640px; }
+			.wpel-alert-overlap ul { margin: 0 0 0 1.5em; list-style: disc; }
 			@media (max-width: 960px) {
 				.wpel-settings-columns { display: block; }
 				.wpel-settings-sidebar { width: auto; margin-top: 24px; }
@@ -1006,28 +1043,21 @@ class WPEL_Admin {
 		} )();
 
 		( function () {
-			// The alert phone numbers and submission texts only apply with SMS
-			// alerts on, the unopened-alert settings with "Track opens" on, and
+			// The unopened-alert settings only apply with "Track opens" on, and
 			// "Watched emails" with Track opens or submission texts, so they're
 			// shown only then. Hidden fields still submit, so their saved values
 			// survive toggling these off.
-			var sms         = document.getElementById( 'wpel_sms_enabled' );
 			var submissions = document.getElementById( 'wpel_submission_texts' );
 			var opens       = document.getElementById( 'wpel_track_opens' );
-			var smsRows     = document.querySelectorAll( '.wpel-sms-row' );
 			var watchRow    = document.querySelector( '.wpel-watch-row' );
 			var unopened    = document.querySelector( '.wpel-unopened-row' );
-			if ( ! sms || ! submissions || ! opens || ! smsRows.length || ! watchRow || ! unopened ) {
+			if ( ! submissions || ! opens || ! watchRow || ! unopened ) {
 				return;
 			}
 			function sync() {
-				smsRows.forEach( function ( row ) {
-					row.style.display = sms.checked ? '' : 'none';
-				} );
 				unopened.style.display = opens.checked ? '' : 'none';
-				watchRow.style.display = opens.checked || ( sms.checked && submissions.checked ) ? '' : 'none';
+				watchRow.style.display = opens.checked || submissions.checked ? '' : 'none';
 			}
-			sms.addEventListener( 'change', sync );
 			submissions.addEventListener( 'change', sync );
 			opens.addEventListener( 'change', sync );
 		} )();
@@ -1143,11 +1173,11 @@ class WPEL_Admin {
 	 * visitor's auto-reply. Every other source is ticked on the Alerting &
 	 * Logging tab instead; see render_other_watch().
 	 *
+	 * @param array $plugins WPEL_Sources::form_plugins(), already loaded by the caller.
 	 * @return string[] The sources listed, for render_other_watch() to skip.
 	 */
-	private function render_watch( $o ) {
-		$plugins = WPEL_Sources::instance()->form_plugins();
-		$listed  = array();
+	private function render_watch( $o, $plugins ) {
+		$listed = array();
 		?>
 		<div id="wpel-unopened-watch">
 			<?php if ( ! $plugins ) : ?>
@@ -1179,6 +1209,93 @@ class WPEL_Admin {
 		</div>
 		<?php
 		return $listed;
+	}
+
+	/**
+	 * Form emails a failure of which would likely take the alert email down
+	 * with it, for the warning under "Alert email recipient". A form email
+	 * recipient counts when every alert address is either that same address
+	 * or on the same domain (a domain whose mail is broken bounces them all).
+	 * One alert address elsewhere is enough: Mailgun delivers to each
+	 * recipient separately, so that one still gets the alert.
+	 *
+	 * A form email that also goes to an address that isn't at risk (e.g.
+	 * info@client.com plus the developer's greg@truemarket.io) is left out
+	 * entirely: if the client's address bounces, the enquiry still reaches
+	 * someone.
+	 *
+	 * Domains in SHARED_MAIL_DOMAINS are only matched by exact address: two
+	 * Gmail users don't share a point of failure the way two addresses on
+	 * the client's own domain do. Recipients that aren't plain addresses
+	 * (field tags like {email-1}, "conditional recipients") are skipped,
+	 * since there's no telling where they go.
+	 *
+	 * @param array $plugins WPEL_Sources::form_plugins().
+	 * @return array[] { form, email, recipient, same_address: bool }
+	 */
+	private function alert_email_overlaps( $o, $plugins ) {
+		$alert = ! empty( $o['alert_email'] ) ? $o['alert_email'] : get_option( 'admin_email' );
+		$alert = $this->extract_emails( $alert );
+		if ( ! $alert ) {
+			return array();
+		}
+
+		$out = array();
+		foreach ( $plugins as $plugin ) {
+			foreach ( $plugin['forms'] as $form ) {
+				foreach ( $form['emails'] as $email ) {
+					$at_risk = array();
+					foreach ( $this->extract_emails( $email['recipients'] ) as $recipient ) {
+						$overlap = $this->alert_overlap( $recipient, $alert );
+						if ( '' === $overlap ) {
+							continue 2; // also goes somewhere safe, so the enquiry gets through
+						}
+						$at_risk[ $recipient ] = 'address' === $overlap;
+					}
+					foreach ( $at_risk as $recipient => $same_address ) {
+						$out[] = array(
+							'form'         => $form['name'],
+							'email'        => $email['label'],
+							'recipient'    => $recipient,
+							'same_address' => $same_address,
+						);
+					}
+				}
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a failed email to $recipient would hit every alert address
+	 * too: 'address' when it's one of them, 'domain' when the rest share its
+	 * (non-webmail) domain, '' when at least one alert address is clear.
+	 *
+	 * @param string   $recipient Lowercased, from extract_emails().
+	 * @param string[] $alert     Alert addresses, from extract_emails().
+	 */
+	private function alert_overlap( $recipient, $alert ) {
+		$domain       = substr( strrchr( $recipient, '@' ), 1 );
+		$same_address = false;
+		foreach ( $alert as $address ) {
+			if ( $address === $recipient ) {
+				$same_address = true;
+			} elseif ( in_array( $domain, self::SHARED_MAIL_DOMAINS, true ) || substr( strrchr( $address, '@' ), 1 ) !== $domain ) {
+				return '';
+			}
+		}
+		return $same_address ? 'address' : 'domain';
+	}
+
+	/**
+	 * Lowercased, de-duplicated addresses found in a recipients string
+	 * ("a@x.com, Name <b@y.com>, {email-1}" gives a@x.com and b@y.com).
+	 *
+	 * @return string[]
+	 */
+	private function extract_emails( $raw ) {
+		preg_match_all( '/[^\s<>,;"\']+@[^\s<>,;"\']+/', strtolower( (string) $raw ), $matches );
+		return array_values( array_unique( array_filter( $matches[0], 'is_email' ) ) );
 	}
 
 	/**
@@ -1238,9 +1355,12 @@ class WPEL_Admin {
 		$has_test_email  = ! empty( $status['test_email_sent'] );
 
 		// SMS only counts toward the alerts step once it can actually send.
+		// Submission texts don't count (they aren't failure alerts), but the
+		// missing-setup note still covers them.
 		$monitor         = WPEL_Mailgun_Monitor::instance();
 		$sms_enabled     = $monitor->sms_enabled();
-		$sms_incomplete  = $sms_enabled && ( empty( $o['twilio_to_numbers'] ) || in_array( '', $monitor->get_twilio_credentials(), true ) );
+		$sms_incomplete  = ( $sms_enabled || $monitor->submission_texts_enabled() )
+			&& ( empty( $o['twilio_to_numbers'] ) || in_array( '', $monitor->get_twilio_credentials(), true ) );
 		$has_alerts      = ! empty( $o['alert_email'] ) || ( $sms_enabled && ! $sms_incomplete );
 
 		// Shared credentials (see wpel_shared_credential()).
@@ -1317,7 +1437,7 @@ class WPEL_Admin {
 						<li><?php echo $has_alerts ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?>
 							Set an alert email and/or enable SMS alerts on the <strong>General</strong> tab (Twilio settings are on the <strong>Alerting &amp; Logging</strong> tab).
 							<?php if ( $sms_incomplete ) : ?>
-								<br><em>SMS alerts are enabled, but the Twilio settings or alert phone numbers aren't filled in yet, so no texts will be sent.</em>
+								<br><em>SMS alerts or submission texts are on, but the Twilio settings or alert phone numbers aren't filled in yet, so no texts will be sent.</em>
 							<?php endif; ?>
 						</li>
 						<li><?php echo $has_test_email ? $done : $todo; // phpcs:ignore WordPress.Security.EscapeOutput ?> Click <strong>Send test email</strong> on the General tab to confirm the whole pipeline end to end.</li>
